@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>doodlebeat</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="d r"></span><span class="d g"></span><span class="d b"></span>doodlebeat</div>
+    <p class="tag">Paint your beat with color.</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2><span class="num">1</span> Base track</h2>
+      <div id="dropzone" class="dropzone" tabindex="0" role="button">
+        <input type="file" id="file-input" accept="audio/*" hidden>
+        <strong>Drop an audio file</strong> or <u>browse</u>
+        <div class="hint">wav · mp3 · ogg · m4a: a beat, loop, or any musical pattern</div>
+      </div>
+      <div class="row">
+        <button id="demo-btn" class="ghost">Use a demo beat</button>
+        <span id="status" class="status"></span>
+      </div>
+      <div id="track-info" class="track-info hidden">
+        <div class="meta"><span id="file-name"></span><span id="chips" class="chips"></span></div>
+        <canvas id="wave"></canvas>
+        <div id="chord-strip" class="chord-strip"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2><span class="num">2</span> Pick three instruments</h2>
+      <div id="inst-grid" class="inst-grid"></div>
+      <p id="inst-hint" class="hint"></p>
+    </section>
+
+    <section class="card">
+      <h2><span class="num">3</span> Mix with color</h2>
+      <div class="mixer">
+        <div id="channels" class="channels"></div>
+        <div class="swatch-wrap">
+          <div id="swatch" class="swatch"><span id="swatch-hex"></span></div>
+          <div id="mood-label" class="mood-label"></div>
+          <div id="mood-desc" class="mood-desc"></div>
+          <label class="picker">or pick a color <input type="color" id="color-picker"></label>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="transport">
+    <button id="play-btn" class="primary" disabled>▶ Play</button>
+    <span class="time"><span id="t-cur">0:00</span> / <span id="t-dur">0:00</span></span>
+    <label class="vol">Original <input type="range" id="base-vol" min="0" max="100" value="80"></label>
+    <label class="loop"><input type="checkbox" id="loop" checked> Loop</label>
+    <button id="export-btn" disabled>⤓ Export WAV</button>
+  </footer>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
