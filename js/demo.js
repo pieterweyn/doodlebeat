@@ -1,5 +1,7 @@
 // Synthesizes a short demo beat (96 BPM, A minor: Am–F–C–G) so the app works without a file.
-import { playDrum, playNote, playBass } from './instruments.js';
+import { playDrum, playNote } from './instruments.js';
+
+const playBass = (ctx, out, midi, t, dur, vel = 0.8) => playNote(ctx, out, 'bass', midi, t, dur, vel);
 
 export async function makeDemoBeat(sr = 44100) {
   const bpm = 96, beat = 60 / bpm, bars = 8, s16 = beat / 4;

@@ -6,8 +6,10 @@ const REG = {
   piano: { R: [60, 84], G: [55, 79], B: [40, 64] },
   violin: { R: [67, 91], G: [62, 86], B: [55, 74] },
   trumpet: { R: [62, 82], G: [58, 79], B: [52, 70] },
+  guitar: { R: [40, 64], G: [52, 79], B: [45, 69] },
+  bass: { R: [33, 52], G: [31, 55], B: [28, 45] },
 };
-const SEED = { drums: 11, violin: 23, trumpet: 37, piano: 53 };
+const SEED = { drums: 11, violin: 23, trumpet: 37, piano: 53, guitar: 67, bass: 79 };
 const mod12 = (n) => ((n % 12) + 12) % 12;
 
 function hash(a, b) {
@@ -101,6 +103,43 @@ function pitched(id, { A, mood, ch, pos, sub, b, bar, L, onset, r, beatDur }, dy
   const vel = dyn * (0.55 + 0.45 * L);
   const note = (notes, beats, v = 1, extra = {}) =>
     out.push({ type: 'note', notes: [].concat(notes), dur: beats * beatDur, vel: vel * v, tone, ...extra });
+
+  if (id === 'bass') {
+    const root = nearestPc(chord.root, lo + 6);
+    const fifth = nearestPc(pcs[2], root + 7), third = nearestPc(pcs[1], root + 4);
+    if (ch === 'R') {
+      if (sub % 2 === 0) note(L > 0.6 && sub === 2 && pos % 2 ? root + 12 : root, 0.45, sub === 0 ? 1 : 0.8);
+      else if (L > 0.7 && onset > 0.6) note(root, 0.2, 0.7);
+    } else if (ch === 'G') {
+      const nextChord = A.chords[Math.min(bar + 1, A.chords.length - 1)];
+      const nextRoot = nearestPc(nextChord.root, root);
+      const walk = [root, L > 0.5 ? third : root, fifth, stepToward(nextRoot, root, A.scalePcs)];
+      if (sub === 0) note(walk[pos], 0.9, pos === 0 ? 1 : 0.85);
+      else if (L > 0.6 && sub === 2 && hash(b, 91) < 0.5) note(stepToward(walk[pos], walk[(pos + 1) % 4], A.scalePcs), 0.4, 0.6);
+    } else {
+      if (pos === 0 && sub === 0) note(root, 3.9, 0.9);
+      else if (L > 0.5 && pos === 2 && sub === 0) note(fifth, 1.9, 0.7);
+    }
+    return out;
+  }
+
+  if (id === 'guitar') {
+    if (ch === 'R') {
+      const root = nearestPc(chord.root, lo + 6);
+      const power = [root, root + 7, root + 12];
+      if (sub === 0 || (L > 0.45 && sub === 2) || (L > 0.75 && onset > 0.5)) note(power, sub === 0 ? 0.4 : 0.2, sub === 0 ? 1 : 0.7, { drive: true, strum: 0.006 });
+    } else if (ch === 'G') {
+      const tones = voice(pcs, lo, hi);
+      const order = [0, 2, 1, 3, 2, 1];
+      const rate = L > 0.65 ? 1 : 2;
+      if (sub % rate === 0) note(tones[order[Math.floor((pos * 4 + sub) / rate) % order.length] % tones.length], 0.6, 0.85);
+    } else {
+      const strum = voice([...pcs.slice(0, 3), pcs[0]], lo, hi);
+      if (pos === 0 && sub === 0) note(strum, 3.9, 0.9, { strum: 0.03 });
+      else if (L > 0.55 && pos === 2 && sub === 0) note(strum.slice(1).reverse(), 1.9, 0.5, { strum: 0.02 });
+    }
+    return out;
+  }
 
   if (ch === 'R') {
     const tones = voice(pcs, lo, hi);

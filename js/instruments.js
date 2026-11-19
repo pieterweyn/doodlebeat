@@ -6,6 +6,8 @@ export const INSTRUMENT_LIST = [
   { id: 'violin', name: 'Violin', icon: '🎻', blurb: 'bowed strings' },
   { id: 'trumpet', name: 'Trumpet', icon: '🎺', blurb: 'bright brass' },
   { id: 'piano', name: 'Piano', icon: '🎹', blurb: 'keys & chords' },
+  { id: 'guitar', name: 'Guitar', icon: '🎸', blurb: 'strums & riffs' },
+  { id: 'bass', name: 'Bass', icon: '𝄢', blurb: 'low end & groove' },
 ];
 
 const mtof = (m) => 440 * Math.pow(2, (m - 69) / 12);
@@ -119,6 +121,54 @@ export function playNote(ctx, out, inst, midi, t, dur, vel = 0.8, opts = {}) {
   if (inst === 'piano') piano(ctx, out, f, t, dur, vel, tone);
   else if (inst === 'violin') violin(ctx, out, f, t, dur, vel, tone, opts.legato);
   else if (inst === 'trumpet') trumpet(ctx, out, f, t, dur, vel, tone, opts.muted);
+  else if (inst === 'guitar') guitar(ctx, out, f, t, dur, vel, tone, opts.drive);
+  else if (inst === 'bass') bass(ctx, out, f, t, dur, vel, tone);
+}
+
+const DRIVE_CURVE = (() => {
+  const n = 1024, c = new Float32Array(n);
+  for (let i = 0; i < n; i++) { const x = (i / (n - 1)) * 2 - 1; c[i] = Math.tanh(6 * x) / Math.tanh(6); }
+  return c;
+})();
+
+function guitar(ctx, out, f, t, dur, vel, tone, drive) {
+  const { env, end } = voiceOut(ctx, out, t, dur, 0.08);
+  const lp = filtered(ctx, 'lowpass', f, 1.2);
+  lp.frequency.setValueAtTime(Math.min(14000, f * (drive ? 6 : 10) * tone + 800), t);
+  lp.frequency.setTargetAtTime(Math.max(200, f * 1.5), t, drive ? 0.25 : 0.12);
+  if (drive) {
+    const ws = ctx.createWaveShaper(), post = filtered(ctx, 'lowpass', 3500 * tone, 0.7);
+    ws.curve = DRIVE_CURVE;
+    lp.connect(ws).connect(post).connect(env);
+  } else lp.connect(env);
+  const peak = (drive ? 0.12 : 0.22) * vel;
+  env.gain.setValueAtTime(0.0001, t);
+  env.gain.exponentialRampToValueAtTime(peak, t + 0.003);
+  env.gain.setTargetAtTime(0.0001, t + 0.003, drive ? 0.5 : clamp(0.3 + 120 / f, 0.3, 1.2));
+  for (const [type, mult, amp, det] of [['sawtooth', 1, 1, -3], ['triangle', 1, 0.6, 4], ['sine', 2, 0.2, 0]]) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type; o.frequency.value = f * mult; o.detune.value = det; g.gain.value = amp;
+    o.connect(g).connect(lp);
+    o.start(t); o.stop(end);
+  }
+}
+
+function bass(ctx, out, f, t, dur, vel, tone) {
+  const { env, end } = voiceOut(ctx, out, t, dur, 0.06);
+  const lp = filtered(ctx, 'lowpass', f * 3, 2);
+  lp.frequency.setValueAtTime(Math.min(4000, f * 8 * tone), t);
+  lp.frequency.setTargetAtTime(f * 2.5, t, 0.12);
+  lp.connect(env);
+  const peak = 0.45 * vel;
+  env.gain.setValueAtTime(0.0001, t);
+  env.gain.exponentialRampToValueAtTime(peak, t + 0.005);
+  env.gain.setTargetAtTime(peak * 0.6, t + 0.005, 0.3);
+  for (const [type, amp] of [['sine', 1], ['sawtooth', 0.5]]) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type; o.frequency.value = f; g.gain.value = amp;
+    o.connect(g).connect(lp);
+    o.start(t); o.stop(end);
+  }
 }
 
 function piano(ctx, out, f, t, dur, vel, tone) {
@@ -188,19 +238,3 @@ function trumpet(ctx, out, f, t, dur, vel, tone, muted) {
   }
 }
 
-// Simple bass used by the demo beat.
-export function playBass(ctx, out, midi, t, dur, vel = 0.8) {
-  const f = mtof(midi);
-  const { env, end } = voiceOut(ctx, out, t, dur, 0.05);
-  const lp = filtered(ctx, 'lowpass', 500, 4);
-  lp.frequency.setValueAtTime(1400, t);
-  lp.frequency.setTargetAtTime(350, t, 0.08);
-  lp.connect(env);
-  env.gain.setValueAtTime(0.0001, t);
-  env.gain.exponentialRampToValueAtTime(0.5 * vel, t + 0.006);
-  env.gain.setTargetAtTime(0.25 * vel, t + 0.006, 0.2);
-  const o = ctx.createOscillator();
-  o.type = 'sawtooth'; o.frequency.value = f;
-  o.connect(lp);
-  o.start(t); o.stop(end);
-}

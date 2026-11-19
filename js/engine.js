@@ -3,15 +3,19 @@ import { playDrum, playNote, makeReverbIR } from './instruments.js';
 import { eventsForStep } from './arranger.js';
 
 const LOOKAHEAD = 0.12, TICK_MS = 25;
-const BASE_GAIN = { drums: 0.8, violin: 0.32, trumpet: 0.26, piano: 0.4 };
+const BASE_GAIN = { drums: 0.8, violin: 0.32, trumpet: 0.26, piano: 0.4, guitar: 0.35, bass: 0.55 };
 const SEND = { R: 0.12, G: 0.25, B: 0.5 };
 
 const irCache = new WeakMap();
-function buildGraph(ctx) {
+function buildGraph(ctx, { compress = true } = {}) {
   const master = ctx.createGain();
-  const comp = ctx.createDynamicsCompressor();
-  comp.threshold.value = -14; comp.ratio.value = 3; comp.attack.value = 0.01; comp.release.value = 0.2;
-  master.connect(comp).connect(ctx.destination);
+  let comp = master;
+  if (compress) {
+    comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -14; comp.ratio.value = 3; comp.attack.value = 0.01; comp.release.value = 0.2;
+    master.connect(comp);
+  }
+  comp.connect(ctx.destination);
   const reverb = ctx.createConvolver();
   if (!irCache.has(ctx)) irCache.set(ctx, makeReverbIR(ctx));
   reverb.buffer = irCache.get(ctx);
@@ -44,7 +48,7 @@ function scheduleStep(ctx, graph, A, cfg, s, when) {
     const out = graph.tracks[tr.id].gain;
     for (const ev of eventsForStep(s, A, tr, cfg.mood)) {
       if (ev.type === 'drum') playDrum(ctx, out, ev.drum, when, ev.vel);
-      else for (const m of ev.notes) playNote(ctx, out, tr.id, m, when, ev.dur, ev.vel, ev);
+      else ev.notes.forEach((m, i) => playNote(ctx, out, tr.id, m, when + i * (ev.strum || 0), ev.dur, ev.vel, ev));
     }
   }
 }
@@ -57,7 +61,13 @@ export class Engine {
     this.onEnded = null;
   }
   get context() {
-    if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (!this.ctx) {
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      // Tap on the final output, used to drive the visuals (orb + live waveform)
+      this.analyser = this.ctx.createAnalyser();
+      this.analyser.fftSize = 2048;
+      this.analyser.smoothingTimeConstant = 0.6;
+    }
     return this.ctx;
   }
   load(buffer, A) { this.stop(); this.buffer = buffer; this.A = A; this.pausedAt = 0; }
@@ -72,6 +82,7 @@ export class Engine {
     if (ctx.state === 'suspended') ctx.resume();
     from = Math.min(Math.max(0, from), this.buffer.duration - 0.01);
     this.graph = buildGraph(ctx);
+    this.graph.comp.connect(this.analyser);
     applyMix(this.graph, this.cfg, ctx, true);
     this.playing = true;
     this.startSegment(ctx.currentTime + 0.06, from);
@@ -136,5 +147,22 @@ export class Engine {
     src.buffer = this.buffer; src.connect(graph.base); src.start(0);
     this.A.stepTimes.forEach((t, s) => scheduleStep(ctx, graph, this.A, this.cfg, s, t));
     return ctx.startRendering();
+  }
+
+  // ---- Visualization renders (mono, low sample rate, no master compressor) ----
+  async renderBaseMono(sr) {
+    const ctx = new OfflineAudioContext(1, Math.ceil(this.buffer.duration * sr), sr);
+    const src = ctx.createBufferSource();
+    src.buffer = this.buffer; src.connect(ctx.destination); src.start(0);
+    return (await ctx.startRendering()).getChannelData(0);
+  }
+  // One instrument alone, exactly as it sits in the mix (gain + reverb), without the base track.
+  async renderStem(track, mood, sr) {
+    const ctx = new OfflineAudioContext(1, Math.ceil(this.buffer.duration * sr), sr);
+    const graph = buildGraph(ctx, { compress: false });
+    const cfg = { tracks: [track], mood, baseVol: 0 };
+    applyMix(graph, cfg, ctx, true);
+    this.A.stepTimes.forEach((t, s) => scheduleStep(ctx, graph, this.A, cfg, s, t));
+    return (await ctx.startRendering()).getChannelData(0);
   }
 }
