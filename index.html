@@ -14,7 +14,7 @@
   <div id="server-banner" class="banner hidden"></div>
 
   <header class="topbar">
-    <div class="brand"><span class="d r"></span><span class="d g"></span><span class="d b"></span><em>doodlebeat</em></div>
+    <div class="brand" id="brand"><span class="d r"></span><span class="d g"></span><span class="d b"></span><em>doodlebeat</em></div>
     <div class="source">
       <input type="file" id="file-input" accept="audio/*,video/*" hidden>
       <button id="load-btn" class="pill">⬆ Select song</button>
@@ -36,16 +36,17 @@
       <div id="track-info" class="track-info hidden">
         <canvas id="wave"></canvas>
         <div id="chord-strip" class="chord-strip"></div>
+        <!-- step 1 for every song: what genre is it already? The mood then starts from there -->
+        <div id="song-genre" class="song-genre need" role="group" aria-label="The song's genre"></div>
       </div>
       <div id="split-bar" class="split-bar hidden"><div class="split-fill"></div><span class="split-msg"></span></div>
     </section>
 
-    <!-- ② + ③ side by side when there is room -->
-    <div class="workbench" id="workbench">
-    <!-- ② The band: one channel per stem, replaceable, plus extra channels -->
+    <!-- ② The band: one channel per stem (full width, two columns: 6 stems = 3 × 2), replaceable, plus extra channels -->
     <section id="band" class="band hidden">
       <div class="section-head">
         <h2 class="fancy">The band</h2>
+        <button id="rave-btn" class="rave-toggle" aria-pressed="false" title="RAVE neural textures on each channel (off by default)">RAVE</button>
       </div>
       <div id="channels" class="channels"></div>
       <div class="band-foot">
@@ -54,62 +55,37 @@
       </div>
     </section>
 
+    <!-- ③ Set the mood + ④ what it does per instrument, side by side when there is room -->
+    <div class="workbench" id="workbench">
+
     <!-- ③ Set the mood -->
     <div class="mood-wrap">
       <section class="stage" id="stage">
         <div class="stage-head">
           <h2 class="stage-title">Set the mood</h2>
-          <button id="spectrum-btn" class="spectrum-btn" aria-expanded="false" aria-controls="spectrum-overlay">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 18V12M7 18V7M11 18V4M15 18V9M19 18V13" /></svg>
-            <span>Spectrum</span>
-          </button>
         </div>
         <div class="stage-grid">
-          <div class="genres">
-            <div id="genre-bars" class="genre-bars"></div>
-            <div class="strength">
-              <span>Strength</span>
-              <div id="strength-bar" class="gbar" role="slider" tabindex="0" aria-label="Mood strength" aria-valuemin="0" aria-valuemax="100"><div class="gfill"></div></div>
-              <b id="strength-val">0%</b>
-            </div>
-          </div>
-          <div class="palette">
+          <div class="orb-row">
             <div class="orb-wrap">
               <canvas id="orb-wave" class="orb-wave" aria-hidden="true"></canvas>
               <div id="swatch" class="orb">
-                <div class="orb-text"><div id="mood-label" class="mood-label"></div><div id="mood-desc" class="mood-desc"></div></div>
+                <div class="orb-text"><div id="mood-label" class="mood-label"></div></div>
               </div>
             </div>
-            <div class="pad-col">
-              <div class="pad-wrap">
-                <canvas id="color-pad" class="color-pad" aria-label="Mood color: drag to choose"></canvas>
-                <div id="pad-anchors" class="pad-anchors"></div>
-                <div id="pad-marker" class="pad-marker"></div>
-              </div>
-              <div id="rgb-map" class="rgb-map" aria-label="What each color component controls"></div>
+          </div>
+          <div class="pad-col">
+            <div class="pad-wrap">
+              <canvas id="color-pad" class="color-pad" aria-label="Mood color: drag to choose"></canvas>
+              <div id="pad-anchors" class="pad-anchors"></div>
+              <div id="pad-origin" class="pad-origin" hidden><span>the song</span></div>
+              <div id="pad-marker" class="pad-marker"></div>
             </div>
+            <div id="rgb-map" class="rgb-map" aria-label="What each color component controls"></div>
           </div>
         </div>
       </section>
     </div>
 
-    <!-- Spectral view: opens over the page, just below "Set the mood" -->
-      <section id="spectrum-overlay" class="spectrum-overlay" role="dialog" aria-label="Spectral view" hidden>
-        <div class="studio-head">
-          <h2 class="fancy">Spectral view</h2>
-          <span id="viz-status" class="status"></span>
-          <button id="spectrum-close" class="close" aria-label="Close spectral view">✕</button>
-        </div>
-        <div id="viz-toolbar" class="viz-toolbar hidden">
-          <button data-zoom="in" title="Zoom in">＋</button>
-          <button data-zoom="out" title="Zoom out">−</button>
-          <button data-zoom="reset" title="Show the whole song">Reset</button>
-          <span class="viz-range"></span>
-          <span class="viz-help">scroll or pinch to zoom · drag to pan · double-click to reset · click to seek</span>
-        </div>
-        <div id="viz" class="viz"><p class="hint">No song yet.</p></div>
-      </section>
-    </div>
 
     <!-- ④ The heart: what the mood does to every instrument -->
     <section class="scope" id="scope">
@@ -119,21 +95,22 @@
       <div id="scope-chips" class="scope-chips"></div>
       <div class="scope-grid">
         <div class="scope-main">
-          <div class="eq-box"><canvas id="eq-canvas" class="eq-canvas" aria-label="EQ curve and live spectrum"></canvas></div>
+          <div class="eq-plug">
+            <div id="eq-bandbar" class="eq-bandbar" aria-label="EQ bands on/off"></div>
+            <div class="eq-box"><canvas id="eq-canvas" class="eq-canvas" aria-label="EQ curve and live spectrum: drag a dot (left/right frequency, up/down gain), Alt-drag or scroll for Q, double-click to reset a band"></canvas></div>
+            <div id="eq-values" class="eq-values"></div>
+          </div>
           <div class="eq-legend">
             <span><i class="pre"></i>before</span><span><i class="post"></i>after</span><span><i class="curve"></i>EQ</span><span><i class="dash"></i>mood only</span>
             <button id="eq-reset" class="pill ghost small eq-reset" disabled title="Drag a dot: up/down = gain, left/right = frequency · double-click a dot resets it">Reset EQ</button>
           </div>
-        </div>
-        <div class="scope-side">
+          <!-- a channel's dynamics and space from the mood (empty for the mix) -->
           <div id="param-bars" class="param-bars"></div>
-          <div class="latent">
-            <div class="latent-head">Genre map <span id="latent-sub" class="hint"></span></div>
-            <canvas id="latent-canvas" class="latent-canvas" aria-label="Genre map"></canvas>
-          </div>
         </div>
       </div>
     </section>
+    </div>
+
 
     <footer class="credits">
       <h3 class="fancy">References</h3>

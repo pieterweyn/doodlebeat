@@ -1,13 +1,13 @@
-// Live playback of the channels (stems) through their mood chains, plus offline renders for the visuals.
+// Live playback of the channels (stems) through their mood chains.
 // Before the stems are ready the original song plays straight through.
-import { createChain, createReverb, NEUTRAL } from './dsp.js';
+import { createChain, createEq, createReverb, NEUTRAL } from './dsp.js';
 
 export class Engine {
   constructor() {
-    this.ctx = null; this.schema = null; this.graph = null;
+    this.ctx = null; this.graph = null;
     this.original = null;
     this.channels = new Map(); // id → { buffer, levels, levelPos, textureWet, chain, texDry, levelGains, settings, gainDb, muted, solo }
-    this.bypass = false; this.loop = true;
+    this.bypass = false; this.loop = true; this.mixEq = null; // combined EQ on the mix bus: [band ×8], null = flat
     this.playing = false; this.pausedAt = 0; this.srcs = []; this.t0 = 0;
     this.onEnded = null;
   }
@@ -19,19 +19,29 @@ export class Engine {
     }
     return this.ctx;
   }
-  setSchema(schema) { this.schema = schema; }
 
   ensureGraph() {
     if (this.graph) return this.graph;
     const ctx = this.context;
     const master = ctx.createGain(), bus = ctx.createDynamicsCompressor(), direct = ctx.createGain();
     bus.threshold.value = -14; bus.ratio.value = 3; bus.attack.value = 0.01; bus.release.value = 0.2;
-    master.connect(bus); bus.connect(this.analyser); this.analyser.connect(ctx.destination);
-    direct.connect(this.analyser); // the untouched original (before the stems arrive)
+    // The combined EQ sits on both paths: the stems' bus, and the original song before the stems arrive.
+    const mixEq = createEq(ctx, true), directEq = createEq(ctx, true);
+    master.connect(mixEq.input); mixEq.output.connect(bus); bus.connect(this.analyser); this.analyser.connect(ctx.destination);
+    direct.connect(directEq.input); directEq.output.connect(this.analyser);
     const reverb = createReverb(ctx, master);
-    this.graph = { master, bus, direct, reverb };
+    this.graph = { master, bus, direct, reverb, mixEq, directEq };
+    this.applyMixEq(true);
     return this.graph;
   }
+  setMixEq(bands) { this.mixEq = bands; this.applyMixEq(); }
+  applyMixEq(immediate = false) {
+    if (!this.graph) return;
+    const s = this.bypass ? null : this.mixEq; // Mood off = as recorded
+    this.graph.mixEq.apply(s, immediate); this.graph.directEq.apply(s, immediate);
+  }
+  // before/after analysers of the combined EQ on whichever path is playing
+  get mixStage() { return this.graph ? (this.mode === 'stems' ? this.graph.mixEq : this.graph.directEq) : null; }
 
   get duration() {
     let d = 0;
@@ -48,7 +58,7 @@ export class Engine {
   }
   addChannel(id, buffer, opts = {}, restart = true) {
     const g = this.ensureGraph(), ctx = this.ctx;
-    const chain = createChain(ctx, this.schema, { out: g.master, reverb: g.reverb, analysers: true });
+    const chain = createChain(ctx, { out: g.master, reverb: g.reverb, analysers: true });
     const texDry = ctx.createGain();
     texDry.connect(chain.input);
     this.channels.set(id, { buffer, levels: [], levelGains: [], levelPos: 1, textureWet: 0, chain, texDry, settings: NEUTRAL, gainDb: 0, muted: false, solo: false, ...opts });
@@ -73,7 +83,7 @@ export class Engine {
     ch.chain.disconnect(); this.channels.delete(id); this.restartIfPlaying();
   }
   update(id, patch) { const ch = this.channels.get(id); if (ch) { Object.assign(ch, patch); this.applyAll(); } }
-  setBypass(b) { this.bypass = b; this.applyAll(); }
+  setBypass(b) { this.bypass = b; this.applyAll(); this.applyMixEq(); }
   apply(id, immediate = false) {
     const ch = this.channels.get(id); if (!ch) return;
     const anySolo = [...this.channels.values()].some((c) => c.solo);
@@ -129,34 +139,6 @@ export class Engine {
     return this.loop ? ((p % d) + d) % d : Math.min(Math.max(p, 0), d);
   }
   seek(t) { if (this.playing) this.play(t); else this.pausedAt = t; }
-
-  // ---- Offline renders for the spectral view (mono, low sample rate, no bus compressor) ----
-  async renderMono(sr, build) {
-    const len = Math.ceil(this.duration * sr);
-    const ctx = new OfflineAudioContext(2, len, sr);
-    build(ctx);
-    const out = await ctx.startRendering(), L = out.getChannelData(0), R = out.getChannelData(1);
-    const m = new Float32Array(len);
-    for (let i = 0; i < len; i++) m[i] = (L[i] + R[i]) / 2;
-    return m;
-  }
-  renderBuffer(buffer, sr) {
-    return this.renderMono(sr, (ctx) => { const s = ctx.createBufferSource(); s.buffer = buffer; s.connect(ctx.destination); s.start(0); });
-  }
-  renderChannel(id, sr, { bypass = this.bypass } = {}) {
-    const ch = this.channels.get(id);
-    return this.renderMono(sr, (ctx) => {
-      const reverb = createReverb(ctx, ctx.destination);
-      const chain = createChain(ctx, this.schema, { out: ctx.destination, reverb });
-      chain.apply(bypass ? NEUTRAL : ch.settings, { gainDb: ch.gainDb, muted: false }, true);
-      const w = ch.levels.length && !bypass ? ch.textureWet : 0, lw = levelWeights(ch.levels.length, ch.levelPos);
-      for (const [buf, gain] of [[ch.buffer, 1 - w], ...ch.levels.map((b, i) => [b, w * lw[i]])]) {
-        if (!buf || !gain) continue;
-        const s = ctx.createBufferSource(), g = ctx.createGain();
-        s.buffer = buf; g.gain.value = gain; s.connect(g); g.connect(chain.input); s.start(0);
-      }
-    });
-  }
 }
 
 // Equal-power crossfade weights for a position between levels 0 … n-1.

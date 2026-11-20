@@ -1,8 +1,12 @@
 // Per-channel processing chain for the live preview (Web Audio).
 // The formulas mirror server/render.py, which renders the final mix with pedalboard. Keep them in sync.
 //
-//  source → input → EQ ×5 → saturation (dry ∥ waveshaper) → compressor → makeup → M/S width → fader ─┬→ bus
-//                                                                                                  └→ send → reverb
+//  source → input → EQ (8 bands) → saturation (dry ∥ waveshaper) → compressor → makeup → M/S width → fader ─┬→ bus
+//                                                                                                         └→ send → reverb
+//  bus (all channels + reverb) → mix EQ (8 bands) → glue compressor → out
+//
+// The EQ follows Logic / Final Cut's Channel EQ: low cut, low shelf, four bells, high shelf, high cut.
+// The mood model drives five of them (its schema bands); the other three are yours.
 
 export const REVERB_SEND = 0.5;
 export const dbToGain = (db) => 10 ** (db / 20);
@@ -36,18 +40,9 @@ export function createReverb(ctx, dest) {
   return conv;
 }
 
-export function createChain(ctx, schema, { out, reverb, analysers = false }) {
+export function createChain(ctx, { out, reverb, analysers = false }) {
   const node = (gain = 1) => { const g = ctx.createGain(); g.gain.value = gain; return g; };
-  const input = node();
-  Object.assign(input, { channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers' }); // mono → stereo
-
-  const bands = schema.bands.map((b) => {
-    const f = ctx.createBiquadFilter();
-    f.type = b.type; f.frequency.value = b.freq; f.Q.value = b.q; f.gain.value = 0;
-    return f;
-  });
-  let last = input;
-  for (const f of bands) { last.connect(f); last = f; }
+  const eq = createEq(ctx), input = eq.input, last = eq.output; // input is stereo (mono → stereo)
 
   const dry = node(1), wet = node(0), shaper = ctx.createWaveShaper(), satSum = node();
   shaper.oversample = '2x';
@@ -81,8 +76,7 @@ export function createChain(ctx, schema, { out, reverb, analysers = false }) {
   function apply(s, { gainDb = 0, muted = false } = {}, immediate = false) {
     const t = ctx.currentTime;
     const set = (p, v) => (immediate ? p.setValueAtTime(v, t) : p.setTargetAtTime(v, t, 0.05));
-    s.eq.forEach((g, i) => set(bands[i].gain, g));
-    if (s.freqs) s.freqs.forEach((f, i) => set(bands[i].frequency, f));
+    eq.apply(s.bands, immediate);
     const m = Math.min(1, 1.5 * s.sat);
     set(dry.gain, 1 - m); set(wet.gain, m);
     if (Math.abs(s.sat - lastSat) > 0.01) { shaper.curve = satCurve(s.sat); lastSat = s.sat; }
@@ -99,19 +93,81 @@ export function createChain(ctx, schema, { out, reverb, analysers = false }) {
   return { input, apply, disconnect, pre, post };
 }
 
-// EQ magnitude response (dB) of a settings vector at the given frequencies.
-let probe = null;
-export function eqResponse(schema, eq, freqs, bandFreqs = null) {
-  if (!probe) {
-    const ctx = new OfflineAudioContext(1, 1, 44100);
-    probe = schema.bands.map((b) => { const f = ctx.createBiquadFilter(); f.type = b.type; f.frequency.value = b.freq; f.Q.value = b.q; return f; });
+// ---------- the EQ ----------
+// A band: { type, on, freq, gain, q, slope }. Cuts are Butterworth cascades (12…48 dB/oct); your Q sets the resonance.
+export const EQ_DB = 24, Q_MIN = 0.1, Q_MAX = 12, SLOPES = [12, 24, 36, 48];
+const BUTTER = { 12: [0.7071], 24: [0.5412, 1.3066], 36: [0.5176, 0.7071, 1.9319], 48: [0.5098, 0.6013, 0.9, 2.5629] };
+const STAGES = { highpass: 4, lowpass: 4 }; // biquads reserved per band (others: 1)
+export const isCut = (type) => type === 'highpass' || type === 'lowpass';
+
+// The 8 bands, low to high. `mood` = index of the mood model's schema band that drives this one.
+export function eqBands(schema) {
+  const m = (i) => ({ type: schema.bands[i].type, label: schema.bands[i].label, freq: schema.bands[i].freq, q: schema.bands[i].q, mood: i, on: true });
+  return [
+    { type: 'highpass', label: 'Low Cut', freq: 30, q: 0.71, slope: 24, on: false, color: '#ff4d5e' },
+    { ...m(0), color: '#ff9f43' },
+    { ...m(1), color: '#ffd84d' },
+    { ...m(2), color: '#3ddc84' },
+    { ...m(3), color: '#2ed3c6' },
+    { type: 'peaking', label: 'Bell', freq: 6500, q: 0.71, on: true, color: '#4d8dff' },
+    { ...m(4), color: '#a77bff' },
+    { type: 'lowpass', label: 'High Cut', freq: 17000, q: 0.71, slope: 12, on: false, color: '#ff5fa2' },
+  ];
+}
+
+// One band → the biquads that realize it: [{ type, freq, q (linear), gain }]
+export function bandBiquads(b) {
+  if (!b?.on) return [];
+  if (isCut(b.type)) {
+    const qs = BUTTER[b.slope] ?? BUTTER[24], k = b.q / 0.71;
+    return qs.map((q, i) => ({ type: b.type, freq: b.freq, q: i === qs.length - 1 ? q * k : q, gain: 0 }));
   }
+  return [{ type: b.type, freq: b.freq, q: b.q, gain: b.gain || 0 }];
+}
+
+// Web Audio's lowpass/highpass take Q in dB; peaking takes it linear; shelves ignore it (slope S = 1).
+function setBiquad(f, spec, set) {
+  const type = spec?.type ?? 'peaking';
+  if (f.type !== type) { f.type = type; set = (p, v) => p.setValueAtTime(v, f.context.currentTime); }
+  if (!spec) { set(f.gain, 0); return; } // a peaking filter at 0 dB passes everything unchanged
+  set(f.frequency, spec.freq); set(f.gain, spec.gain);
+  set(f.Q, isCut(type) ? 20 * Math.log10(spec.q) : spec.q);
+}
+
+// An EQ stage (8 bands). apply(bands) with bands = undefined → flat.
+export function createEq(ctx, analysers = false) {
+  const input = ctx.createGain();
+  Object.assign(input, { channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers' });
+  const types = ['highpass', 'lowshelf', 'peaking', 'peaking', 'peaking', 'peaking', 'highshelf', 'lowpass'];
+  const slots = types.map((t) => Array.from({ length: STAGES[t] ?? 1 }, () => {
+    const f = ctx.createBiquadFilter(); f.type = 'peaking'; f.gain.value = 0; return f;
+  }));
+  let output = input;
+  for (const f of slots.flat()) { output.connect(f); output = f; }
+  let pre = null, post = null;
+  if (analysers) {
+    pre = ctx.createAnalyser(); post = ctx.createAnalyser();
+    for (const a of [pre, post]) { a.fftSize = 4096; a.smoothingTimeConstant = 0.8; }
+    input.connect(pre); output.connect(post);
+  }
+  function apply(bands, immediate = false) {
+    const t = ctx.currentTime;
+    const set = (p, v) => (immediate ? p.setValueAtTime(v, t) : p.setTargetAtTime(v, t, 0.03));
+    slots.forEach((fs, i) => { const specs = bandBiquads(bands?.[i]); fs.forEach((f, k) => setBiquad(f, specs[k], set)); });
+  }
+  return { input, output, apply, pre, post };
+}
+
+// Magnitude response (dB) of a set of bands (or one band) at the given frequencies.
+let probe = null;
+export function eqResponse(bands, freqs) {
+  probe ??= new OfflineAudioContext(1, 1, 44100).createBiquadFilter();
   const total = new Float32Array(freqs.length), mag = new Float32Array(freqs.length), ph = new Float32Array(freqs.length);
-  probe.forEach((f, i) => {
-    f.gain.value = eq[i] || 0;
-    f.frequency.value = bandFreqs?.[i] ?? schema.bands[i].freq;
-    f.getFrequencyResponse(freqs, mag, ph);
+  for (const b of bands || []) for (const s of bandBiquads(b)) {
+    probe.type = s.type; probe.frequency.value = s.freq; probe.gain.value = s.gain;
+    probe.Q.value = isCut(s.type) ? 20 * Math.log10(s.q) : s.q;
+    probe.getFrequencyResponse(freqs, mag, ph);
     for (let k = 0; k < freqs.length; k++) total[k] += 20 * Math.log10(mag[k] + 1e-12);
-  });
+  }
   return total;
 }

@@ -23,7 +23,9 @@ sys.path.insert(0, str(HERE))
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
+from typing import Literal  # noqa: E402
+
+from pydantic import BaseModel, Field  # noqa: E402
 
 import audio_io  # noqa: E402
 import mood_model  # noqa: E402
@@ -122,14 +124,17 @@ class MoodRequest(BaseModel):
     weights: dict[str, float]
     amount: float = 1.0
     instruments: list[str]
+    source: str | None = None  # the song's own genre (its starting point); None = treat it as neutral
 
 
 @app.post('/api/mood')
 def mood(req: MoodRequest):
+    src = req.source if req.source in mood_model.GENRE_IDS else None
     out = {}
     for inst in dict.fromkeys(req.instruments):
-        s = MODEL.settings(req.weights, req.amount, inst)
-        out[inst] = {'settings': s, 'latent': MODEL.embed(s, inst)}
+        out[inst] = {'settings': MODEL.settings(req.weights, req.amount, inst, src),
+                     'latent': MODEL.position(req.weights, req.amount, inst, src),
+                     'origin': MODEL.origin(inst, src)}
     return out
 
 
@@ -144,10 +149,24 @@ class RenderChannel(BaseModel):
     levels: list[tuple[str, float]] | None = None  # [(src, crossfade weight)] for color-driven RAVE levels
 
 
+class EqBand(BaseModel):
+    type: Literal['highpass', 'lowshelf', 'peaking', 'highshelf', 'lowpass']
+    on: bool = True
+    freq: float = Field(ge=10, le=24000)
+    gain: float = Field(0.0, ge=-30, le=30)
+    q: float = Field(0.71, ge=0.05, le=20)
+    slope: int | None = None
+
+
+class MixEq(BaseModel):
+    bands: list[EqBand] = Field(max_length=16)
+
+
 class RenderRequest(BaseModel):
     song_id: str
     channels: list[RenderChannel]
     stems: bool = False
+    mix_eq: MixEq | None = None  # combined EQ on the whole mix
 
 
 @app.post('/api/render')
@@ -163,7 +182,7 @@ def render_mix(req: RenderRequest):
     (d / 'renders').mkdir(exist_ok=True)
     out = d / 'renders' / f'{time.strftime("%H%M%S")}.{"zip" if req.stems else "wav"}'
     try:
-        render.render(channels, n, out, stems=req.stems)
+        render.render(channels, n, out, stems=req.stems, mix_eq=req.mix_eq.model_dump() if req.mix_eq else None)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return FileResponse(out, media_type='application/zip' if req.stems else 'audio/wav', filename=out.name)

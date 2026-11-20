@@ -1,10 +1,12 @@
 // Color → mood. A point on the color pad becomes a blend of genres (weights) and a strength.
-// Each genre has an anchor on the pad (hue = x, white→pure→black = y). Weights fall off with distance
-// to each anchor; strength is highest at pure colors and fades to 0 toward white and black (= the song as it is).
+// Each genre has an anchor on the pad (hue = x, white→pure→black = y). Weights interpolate the anchors exactly
+// (inverse-distance): ON an anchor the mood is 100% that genre, between anchors it blends smoothly. So with the
+// marker on the song's own genre the mood equals the song and nothing is processed. Strength is highest at pure
+// colors and fades to 0 toward white and black (= the song as it is).
 // This mapping is a UI heuristic. The mood *model* (server) decides what a genre blend does to each instrument.
 
 export const PAD_ANCHORS = {
-  rock: [356 / 360, 0.44],
+  rock: [348 / 360, 0.44], // kept off the edge so the marker is fully visible
   lofi: [24 / 360, 0.68],
   hiphop: [47 / 360, 0.55],
   edm: [172 / 360, 0.3],
@@ -18,19 +20,31 @@ export const INSTRUMENT_ICONS = { vocals: '🎤', drums: '🥁', bass: '🎸', g
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 const hueDist = (a, b) => { const d = Math.abs(a - b) % 1; return Math.min(d, 1 - d); };
 
+const IDW_POWER = 3; // higher = each genre's area is more its own
 export function padToMood(x, y, genres) {
+  const amount = clamp01(1.3 - Math.abs(y - 0.5) * 2.6);
   const raw = {};
   let sum = 0;
   for (const g of genres) {
     const [gx, gy] = PAD_ANCHORS[g.id] ?? [0, 0.5];
-    const w = Math.exp(-((hueDist(x, gx) / HUE_SIGMA) ** 2) - ((y - gy) / Y_SIGMA) ** 2);
-    raw[g.id] = w; sum += w;
+    const d = Math.hypot(hueDist(x, gx) / HUE_SIGMA, (y - gy) / Y_SIGMA);
+    if (d < 1e-6) return { weights: Object.fromEntries(genres.map((o) => [o.id, o.id === g.id ? 1 : 0])), amount }; // on an anchor: pure
+    raw[g.id] = d ** -IDW_POWER; sum += raw[g.id];
   }
   const weights = {};
   let kept = 0;
-  for (const g of genres) { const w = raw[g.id] / (sum || 1); weights[g.id] = w < 0.03 ? 0 : w; kept += weights[g.id]; }
+  for (const g of genres) { const w = raw[g.id] / sum; weights[g.id] = w < 0.03 ? 0 : w; kept += weights[g.id]; }
   for (const id in weights) weights[id] /= kept || 1;
-  return { weights, amount: clamp01(1.3 - Math.abs(y - 0.5) * 2.6) };
+  return { weights, amount };
+}
+// The anchor within `px` pixels of a pad point (for snapping), or null.
+export function nearAnchor(x, y, w, h, px = 14) {
+  let best = null, bd = px;
+  for (const [id, [ax, ay]] of Object.entries(PAD_ANCHORS)) {
+    const d = Math.hypot(hueDist(x, ax) * w, (y - ay) * h);
+    if (d < bd) { bd = d; best = id; }
+  }
+  return best;
 }
 
 // Where a hand-edited blend sits on the pad (weighted circular mean of the anchors).

@@ -1,10 +1,9 @@
 // doodlebeat: select a song → it splits into stems → set the mood → press play.
 import { analyzeBuffer } from './analysis.js';
 import { Engine, levelWeights } from './engine.js';
-import { NEUTRAL } from './dsp.js';
-import { padToMood, moodToPad, moodColor, moodLabel, padToRgb, PAD_ANCHORS, INSTRUMENT_COLORS } from './mood.js';
+import { NEUTRAL, eqBands, EQ_DB, Q_MIN, Q_MAX } from './dsp.js';
+import { padToMood, nearAnchor, moodColor, moodLabel, padToRgb, PAD_ANCHORS, INSTRUMENT_COLORS } from './mood.js';
 import { MoodScope } from './moodviz.js';
-import { Visualizer, VIZ_SR } from './visualize.js';
 
 const $ = (id) => document.getElementById(id);
 const fmt = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
@@ -25,20 +24,22 @@ function routeFor(inst) {
   return state.cfg?.texture.models.some((m) => m.id === r.model) ? r : null;
 }
 const ICON_MUTE = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M3.5 3.5l17 17"/></svg>';
-const ICON_SLIDERS = '<svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 4v16M12 4v16M19 4v16"/><circle cx="5" cy="14" r="2.2" fill="#0b0b10"/><circle cx="12" cy="8" r="2.2" fill="#0b0b10"/><circle cx="19" cy="16" r="2.2" fill="#0b0b10"/></svg>';
 const ICON_SOLO = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16v-3.5a8 8 0 0 1 16 0V16"/><rect x="3.2" y="13.5" width="4.3" height="6.5" rx="1.6"/><rect x="16.5" y="13.5" width="4.3" height="6.5" rx="1.6"/></svg>';
 
 const state = {
   cfg: null,
   song: null, // { id (server), name, buffer, analysis, token }
-  channels: [], // { id, instrument, name, url, origUrl, origName, gainDb, muted, solo, texModel, texWet, rave, texState, eqUser, latent }
+  rave: false, // RAVE textures on the channels: off by default; the per-channel model buttons only show when on
+  channels: [], // { id, instrument, name, url, origUrl, origName, gainDb, muted, solo, texModel, texWet, raveOn, rave, texState, eqUser }
   pad: { x: 24 / 360, y: 0.62 }, weights: {}, amount: 1, mood: {},
   moodOn: true,
+  eqDefs: [], // the 8 EQ bands (dsp.eqBands)
+  mixEq: null, // combined EQ on the whole mix: your edits per band (starts flat)
+  mixColor: '#b38c66',
 };
+const MIX = '_mix'; // scope key of the combined EQ
 const engine = new Engine();
-const viz = new Visualizer($('viz'), $('viz-status'), $('viz-toolbar'));
-viz.onSeek = (f) => engine.duration && engine.seek(f * engine.duration);
-const scope = new MoodScope({ chipsEl: $('scope-chips'), eqCanvas: $('eq-canvas'), paramsEl: $('param-bars'), latentCanvas: $('latent-canvas'), latentSub: $('latent-sub') });
+const scope = new MoodScope({ chipsEl: $('scope-chips'), eqCanvas: $('eq-canvas'), bandBarEl: $('eq-bandbar'), valuesEl: $('eq-values'), paramsEl: $('param-bars') });
 const bufferCache = new Map(); // url → AudioBuffer
 let songToken = 0, chanSeq = 0;
 
@@ -70,11 +71,10 @@ async function init() {
     return;
   }
   const cfg = state.cfg;
-  engine.setSchema(cfg.schema);
-  scope.setConfig(cfg);
+  state.eqDefs = eqBands(cfg.schema); state.mixEq = newUserEq();
+  scope.setConfig(cfg, state.eqDefs);
   $('sep-model').innerHTML = cfg.separation.models.map((m) => `<option value="${m.id}"${m.id === cfg.separation.default ? ' selected' : ''}>${esc(m.label)}</option>`).join('');
-  $('strength-bar').closest('.genres').title = `Mood model: ${cfg.model.trained ? 'trained' : 'placeholder'}. ${cfg.model.description}`;
-  renderGenreBars();
+  $('color-pad').title = `Drag to choose the mood · mood model: ${cfg.model.trained ? 'trained' : 'placeholder'}. ${cfg.model.description}`;
   renderAnchors();
   drawPad();
   setPad(state.pad.x, state.pad.y);
@@ -101,7 +101,8 @@ async function loadSong(file) {
   const token = ++songToken;
   engine.stop(); updatePlayBtn();
   engine.clearChannels(); state.channels = []; bufferCache.clear();
-  state.song = { name: file.name, token };
+  state.song = { name: file.name, token, genre: null }; // genre: picked by you, the mood's starting point
+  renderSongGenre(); setPad(state.pad.x, state.pad.y); // nothing is applied until you pick the song's genre
   $('band').classList.remove('hidden');
   renderChannels();
   refreshScopeItems();
@@ -167,6 +168,29 @@ function setSplit(p, msg, err = false) {
   bar.querySelector('.split-msg').textContent = msg;
 }
 
+// ---- the song's own genre: you pick it first; the mood moves the mix FROM it (a Lo-fi song set to Lo-fi stays as it is) ----
+function renderSongGenre() {
+  const el = $('song-genre'), g = state.song?.genre;
+  el.classList.toggle('need', !g);
+  el.innerHTML = `<span class="sg-q">${g ? 'This song is' : 'First: what genre is this song?'}</span>` +
+    state.cfg.genres.map((gn) => `<button data-genre="${gn.id}" style="--c:${gn.color}" aria-pressed="${gn.id === g}" title="${esc(gn.blurb)}">${esc(gn.name)}</button>`).join('') +
+    `<span class="sg-note">${g ? `the mood starts from ${esc(state.cfg.genres.find((x) => x.id === g).name)}: only the difference is applied` : 'until you pick, the mood treats the recording as neutral'}</span>`;
+  const o = $('pad-origin'), at = g && PAD_ANCHORS[g];
+  o.hidden = !at;
+  if (at) { // kept inside the pad; near an edge the label points inward
+    o.style.left = `${Math.max(0.035, Math.min(0.965, at[0])) * 100}%`; o.style.top = `${Math.max(0.1, Math.min(0.8, at[1])) * 100}%`;
+    o.dataset.edge = at[0] > 0.85 ? 'r' : at[0] < 0.15 ? 'l' : '';
+  }
+}
+$('song-genre').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-genre]'); if (!b || !state.song) return;
+  state.song.genre = state.song.genre === b.dataset.genre ? null : b.dataset.genre; // click again to clear
+  renderSongGenre();
+  // start exactly at the song's genre: the marker sits on its anchor, so every EQ is flat until you move away
+  const at = state.song.genre && PAD_ANCHORS[state.song.genre];
+  if (at) setPad(at[0], at[1]); else setPad(state.pad.x, state.pad.y);
+});
+
 function renderTrackInfo() {
   const A = state.song.analysis;
   $('lane-empty').classList.add('hidden');
@@ -175,13 +199,14 @@ function renderTrackInfo() {
   $('chips').innerHTML = [`${A.bpm} BPM`, A.key.name, fmt(A.duration)].map((c) => `<span class="chip">${c}</span>`).join('');
   $('t-dur').textContent = fmt(A.duration);
   $('chord-strip').innerHTML = A.chords.map((c) => `<span>${c.name}</span>`).join('');
+  renderSongGenre();
   currentBar = -1;
   drawWave();
 }
 
 // ---------- song waveform ----------
 const canvas = $('wave');
-let waveImg = null, currentBar = -1;
+let waveImg = null, currentBar = -1, lastBeat = -1;
 function drawWave() {
   const buf = state.song?.buffer; if (!buf) return;
   const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth * dpr, h = canvas.clientHeight * dpr;
@@ -221,39 +246,56 @@ function guessInstrument(name) {
 }
 
 function addChannel(info, buffer, restart = true) {
-  const ch = { gainDb: 0, muted: false, solo: false, texModel: '', texWet: 0.5, rave: null, texState: '', origUrl: info.url, origName: info.name,
-    eqUser: { gain: [0, 0, 0, 0, 0], freq: [null, null, null, null, null] }, ...info };
+  const ch = { gainDb: 0, muted: false, solo: false, texModel: '', texWet: 0.5, raveOn: true, rave: null, texState: '', origUrl: info.url, origName: info.name,
+    eqUser: newUserEq(), ...info };
   state.channels.push(ch);
   engine.addChannel(ch.id, buffer, { settings: effective(ch) }, restart);
 }
 function settingsFor(inst) { return state.mood[inst]?.settings ?? state.mood.other?.settings ?? NEUTRAL; }
 
-// What a channel actually gets: the mood's settings for its instrument + your hand EQ on top.
-function effective(ch) {
-  const m = settingsFor(ch.instrument), bands = state.cfg.schema.bands;
-  return { ...m, eq: m.eq.map((g, i) => Math.max(-15, Math.min(15, g + ch.eqUser.gain[i]))), freqs: bands.map((b, i) => ch.eqUser.freq[i] ?? b.freq) };
+// ---- EQ: 8 bands (dsp.eqBands). Your edits are kept per band; gain is an offset on top of the mood's gain. ----
+const clampDb = (g) => Math.max(-EQ_DB, Math.min(EQ_DB, g));
+function newUserEq() { return state.eqDefs.map(() => ({ on: null, gain: 0, freq: null, q: null, slope: null })); }
+function bandsFrom(user, moodEq) {
+  return state.eqDefs.map((d, i) => {
+    const u = user?.[i];
+    return { type: d.type, on: u?.on ?? d.on, freq: u?.freq ?? d.freq, q: u?.q ?? d.q, slope: u?.slope ?? d.slope,
+      gain: clampDb((d.mood != null ? moodEq?.[d.mood] ?? 0 : 0) + (u?.gain ?? 0)) };
+  });
 }
-const isEdited = (ch) => ch.eqUser.gain.some((g) => Math.abs(g) > 0.05) || ch.eqUser.freq.some((f) => f != null);
+const isEdited = (u) => u.some((b, i) => (b.on != null && b.on !== state.eqDefs[i].on) || Math.abs(b.gain) > 0.05 || b.freq != null || b.q != null || b.slope != null);
+// What a channel actually gets: the mood's settings for its instrument, with your EQ on top.
+function effective(ch) { const m = settingsFor(ch.instrument); return { ...m, bands: bandsFrom(ch.eqUser, m.eq) }; }
 function applyChannel(ch) { engine.update(ch.id, { settings: effective(ch) }); }
+// The combined EQ: only your hand settings (the mood shapes each channel, not the mix).
+const mixBands = () => bandsFrom(state.mixEq, null);
 
-scope.onEdit = (key, i, { gain, freq, reset }) => {
-  const ch = state.channels.find((c) => c.id === key); if (!ch) return;
-  if (reset) { ch.eqUser.gain[i] = 0; ch.eqUser.freq[i] = null; }
-  else {
-    const base = state.cfg.schema.bands[i].freq;
-    ch.eqUser.gain[i] = gain - settingsFor(ch.instrument).eq[i];
-    ch.eqUser.freq[i] = Math.max(Math.max(20, base / 4), Math.min(Math.min(20000, base * 4), freq)); // each band moves within 2 octaves
-  }
-  applyChannel(ch); scope.renderParams(); syncEqReset(); scheduleViz();
+// What a hand edit in the scope changes: the mix EQ or one channel's EQ.
+function eqTarget(key) {
+  if (key === MIX) return { user: state.mixEq, moodEq: null, apply: () => engine.setMixEq(mixBands()) };
+  const ch = state.channels.find((c) => c.id === key); if (!ch) return null;
+  return { user: ch.eqUser, moodEq: settingsFor(ch.instrument).eq, apply: () => applyChannel(ch) };
+}
+// patch (absolute values): { on?, gain?, freq?, q?, slope?, reset? }
+scope.onEdit = (key, i, patch) => {
+  const t = eqTarget(key); if (!t) return;
+  const u = t.user[i], d = state.eqDefs[i];
+  if (patch.reset) Object.assign(u, { gain: 0, freq: null, q: null, slope: null });
+  if (patch.on != null) u.on = patch.on === d.on ? null : patch.on;
+  if (patch.gain != null) u.gain = clampDb(patch.gain) - (d.mood != null ? t.moodEq?.[d.mood] ?? 0 : 0);
+  if (patch.freq != null) u.freq = Math.max(20, Math.min(20000, patch.freq));
+  if (patch.q != null) u.q = Math.max(Q_MIN, Math.min(Q_MAX, patch.q));
+  if (patch.slope != null) u.slope = patch.slope;
+  t.apply(); scope.refresh(); syncEqReset();
 };
 function syncEqReset() {
-  const ch = state.channels.find((c) => c.id === scope.sel);
-  $('eq-reset').disabled = !ch || !isEdited(ch);
+  const t = eqTarget(scope.sel);
+  $('eq-reset').disabled = !t || !isEdited(t.user);
 }
 $('eq-reset').addEventListener('click', () => {
-  const ch = state.channels.find((c) => c.id === scope.sel); if (!ch) return;
-  ch.eqUser = { gain: [0, 0, 0, 0, 0], freq: [null, null, null, null, null] };
-  applyChannel(ch); scope.renderParams(); syncEqReset(); scheduleViz();
+  const t = eqTarget(scope.sel); if (!t) return;
+  t.user.splice(0, t.user.length, ...newUserEq());
+  t.apply(); scope.refresh(); syncEqReset();
 });
 $('scope-chips').addEventListener('click', () => setTimeout(syncEqReset));
 
@@ -275,7 +317,7 @@ function renderChannels() {
         </select>
         <span class="name" title="${esc(ch.name)}">${esc(ch.name)}</span>
       </div>
-      <canvas data-wave aria-hidden="true"></canvas>
+      <canvas data-wave title="Click to play from here"></canvas>
       <div class="ms">
         <button class="m" data-act="mute" aria-pressed="${ch.muted}" title="Mute" aria-label="Mute">${ICON_MUTE}</button>
         <button class="s" data-act="solo" aria-pressed="${ch.solo}" title="Solo (listen to this channel alone)" aria-label="Solo">${ICON_SOLO}</button>
@@ -289,63 +331,22 @@ function renderChannels() {
           const r = routeFor(ch.instrument);
           if (!r) return '<span class="rave-badge off" title="RAVE model not found in models/rave">RAVE: –</span>';
           const fx = ch.rave ? `z${ch.rave.dim}: ${ch.rave.effect}` : 'preparing…';
-          return `<span class="rave-badge" style="--k:${COLOR_HEX[r.color]}" title="${esc(`${r.color} drives ${r.model}, ${fx}`)}"><b>${r.color}</b>${esc(r.model.replace(/_/g, ' '))}</span>`;
+          return `<button class="rave-badge" data-act="rave" aria-pressed="${ch.raveOn}" style="--k:${COLOR_HEX[r.color]}" title="${esc(`${r.model} is ${ch.raveOn ? 'on' : 'off'}: click to switch ${ch.raveOn ? 'off' : 'on'} · ${r.color} drives it, ${fx}`)}"><b>${r.color}</b>${esc(r.model.replace(/_/g, ' '))}</button>`;
         })()}
-        <input type="range" data-act="texwet" min="0" max="1" step="0.01" value="${ch.texWet}" aria-label="RAVE amount" title="RAVE amount (dry ↔ RAVE)"${ch.rave ? '' : ' disabled'}>
+        <input type="range" data-act="texwet" min="0" max="1" step="0.01" value="${ch.texWet}" aria-label="RAVE amount" title="RAVE amount (dry ↔ RAVE)"${ch.rave && ch.raveOn ? '' : ' disabled'}>
         <span class="tex-state" title="${esc(ch.rave ? `z${ch.rave.dim}: ${ch.rave.effect}` : '')}">${esc(ch.texState)}</span>
-        <button class="icon-btn lat-btn" data-act="latent" aria-pressed="${!!ch.latentOpen}" title="Latent dimensions of this model"${ch.texModel ? '' : ' disabled'}>${ICON_SLIDERS}</button>
       </div>
       <div class="actions">
         <button class="icon-btn" data-act="replace" title="Replace with another recording">⇄</button>
         <button class="icon-btn" data-act="revert" title="Back to the original stem"${ch.url === ch.origUrl ? ' disabled' : ''}>↺</button>
         <button class="icon-btn" data-act="remove" title="Remove channel">✕</button>
       </div>
-      ${ch.latentOpen && ch.texModel ? latentPanel(ch) : ''}
     </div>`).join('');
   syncChannelRows();
   for (const row of wrap.querySelectorAll('.channel[data-id]')) {
     const ch = state.channels.find((c) => c.id === row.dataset.id);
     drawChannelWave(ch, row.querySelector('canvas'));
   }
-}
-
-// ---- RAVE latent: one shift + one scale per latent dimension (z = z · scale + shift, as in the RAVE docs) ----
-const modelInfo = (id) => state.cfg.texture.models.find((m) => m.id === id);
-function ensureLatent(ch) {
-  const m = modelInfo(ch.texModel), n = m?.latent_size || 0;
-  if (ch.latent?.model !== ch.texModel || ch.latent.bias.length !== n) {
-    ch.latent = { model: ch.texModel, bias: Array(n).fill(0), scale: Array(n).fill(1), dirty: false };
-  }
-  return ch.latent;
-}
-const isLatentEdited = (L) => L && (L.bias.some((b) => Math.abs(b) > 1e-6) || L.scale.some((x) => Math.abs(x - 1) > 1e-6));
-function latentPanel(ch) {
-  const m = modelInfo(ch.texModel), L = ensureLatent(ch), maxShare = Math.max(...(m.latent_share || [1]));
-  const dims = L.bias.map((b, i) => {
-    const share = m.latent_share?.[i], driven = ch.rave?.dim === i, r = routeFor(ch.instrument);
-    if (driven) {
-      return `<div class="lp-dim driven" style="--k:${COLOR_HEX[r.color]}">
-      <div class="lp-top"><b>z${i}</b>${share != null ? `<span class="lp-share"><i style="width:${(share / maxShare) * 100}%"></i></span><em>${Math.round(share * 100)}%</em>` : ''}</div>
-      <div class="lp-driven">driven by <b>${r.color}</b><br>${esc(ch.rave.effect)}<br><span>latent shift ±${Math.abs(ch.rave.shifts[0])}</span></div>
-    </div>`;
-    }
-    return `<div class="lp-dim">
-      <div class="lp-top"><b>z${i}</b>${share != null ? `<span class="lp-share" title="share of the sound this dimension carries"><i style="width:${(share / maxShare) * 100}%"></i></span><em>${Math.round(share * 100)}%</em>` : ''}</div>
-      <label>shift <input type="range" data-act="lat-bias" data-i="${i}" min="-3" max="3" step="0.05" value="${b}"><output>${b >= 0 ? '+' : ''}${b.toFixed(2)}</output></label>
-      <label>scale <input type="range" data-act="lat-scale" data-i="${i}" min="0" max="3" step="0.05" value="${L.scale[i]}"><output>×${L.scale[i].toFixed(2)}</output></label>
-    </div>`;
-  }).join('');
-  return `<div class="latent-panel">
-    <div class="lp-head">
-      <div title="The color moves the highlighted dimension live. Shift moves the sound along a dimension; scale below 1 makes it more generic, above 1 exaggerates it. Then press Render."><b>${esc(m.name)}</b> · ${L.bias.length} latent dimensions</div>
-      <div class="lp-actions">
-        <button class="pill ghost small" data-act="lat-random" title="Random shifts on the strongest dimensions">Random</button>
-        <button class="pill ghost small" data-act="lat-reset">Reset</button>
-        <button class="pill small lat-apply${L.dirty ? ' dirty' : ''}" data-act="lat-apply">Render ▸</button>
-      </div>
-    </div>
-    <div class="lp-grid">${dims}</div>
-  </div>`;
 }
 
 function syncChannelRows() {
@@ -388,16 +389,10 @@ $('channels').addEventListener('input', (e) => {
   if (act === 'gain') {
     ch.gainDb = +e.target.value;
     e.target.nextElementSibling.textContent = `${ch.gainDb > 0 ? '+' : ''}${ch.gainDb.toFixed(1)}`;
-    engine.update(ch.id, { gainDb: ch.gainDb }); scheduleViz();
+    engine.update(ch.id, { gainDb: ch.gainDb });
   } else if (act === 'texwet') {
     ch.texWet = +e.target.value;
-    engine.setWet(ch.id, ch.texWet); scheduleViz();
-  } else if (act === 'lat-bias' || act === 'lat-scale') {
-    const L = ensureLatent(ch), i = +e.target.dataset.i, v = +e.target.value;
-    if (act === 'lat-bias') { L.bias[i] = v; e.target.nextElementSibling.textContent = `${v >= 0 ? '+' : ''}${v.toFixed(2)}`; }
-    else { L.scale[i] = v; e.target.nextElementSibling.textContent = `×${v.toFixed(2)}`; }
-    L.dirty = true;
-    e.target.closest('.channel').querySelector('.lat-apply')?.classList.add('dirty');
+    engine.setWet(ch.id, wetOf(ch));
   }
 });
 $('channels').addEventListener('change', (e) => {
@@ -414,6 +409,11 @@ $('channels').addEventListener('change', (e) => {
 let replaceTarget = null;
 const chanInput = $('channel-input');
 $('channels').addEventListener('click', (e) => {
+  if (e.target.matches('canvas[data-wave]') && engine.duration) { // seek from any channel's waveform
+    const r = e.target.getBoundingClientRect();
+    engine.seek(clamp01((e.clientX - r.left) / r.width) * engine.duration);
+    return;
+  }
   const btn = e.target.closest('button[data-act]'); if (!btn) return;
   const ch = channelOf(btn); if (!ch) return;
   const act = btn.dataset.act;
@@ -421,21 +421,15 @@ $('channels').addEventListener('click', (e) => {
     ch[act === 'mute' ? 'muted' : 'solo'] = !ch[act === 'mute' ? 'muted' : 'solo'];
     btn.setAttribute('aria-pressed', act === 'mute' ? ch.muted : ch.solo);
     engine.update(ch.id, { muted: ch.muted, solo: ch.solo });
-    syncChannelRows(); scheduleViz();
+    syncChannelRows();
   } else if (act === 'replace') {
     replaceTarget = ch.id; chanInput.click();
   } else if (act === 'revert') {
     swapAudio(ch, ch.origUrl, ch.origName);
-  } else if (act === 'latent') {
-    ch.latentOpen = !ch.latentOpen; renderChannels();
-  } else if (act === 'lat-apply') {
-    startLevels(ch);
-  } else if (act === 'lat-reset') {
-    const L = ensureLatent(ch);
-    L.bias.fill(0); L.scale.fill(1); L.dirty = true; renderChannels();
-  } else if (act === 'lat-random') {
-    const L = ensureLatent(ch);
-    L.bias = L.bias.map((_, i) => (i < 4 && i !== ch.rave?.dim ? Math.round((Math.random() * 3 - 1.5) * 20) / 20 : 0)); L.dirty = true; renderChannels();
+  } else if (act === 'rave') { // the model label switches the RAVE model on/off (the amount knob keeps its value)
+    ch.raveOn = !ch.raveOn;
+    engine.setWet(ch.id, wetOf(ch));
+    renderChannels();
   } else if (act === 'remove') {
     engine.removeChannel(ch.id);
     state.channels = state.channels.filter((c) => c !== ch);
@@ -468,26 +462,36 @@ async function swapAudio(ch, url, name) {
   const buf = await loadAudio(url);
   Object.assign(ch, { url, name });
   engine.setBuffer(ch.id, buf);
-  renderChannels(); scheduleViz();
+  renderChannels();
   startLevels(ch);
 }
 
 // RAVE levels: the server picks the latent dim that changes this stem most and renders it at a few levels;
 // the color (R, G or B) then crossfades between them live.
+const wetOf = (ch) => (state.rave && ch.raveOn ? ch.texWet : 0);
+// The band's RAVE button: off → no RAVE anywhere and its controls are hidden; on → the model buttons appear
+// (each still switches its own channel) and the levels are rendered for channels that don't have them yet.
+function syncRave() {
+  $('rave-btn').setAttribute('aria-pressed', state.rave);
+  document.body.classList.toggle('rave-on', state.rave);
+  for (const ch of state.channels) engine.setWet(ch.id, wetOf(ch));
+}
+$('rave-btn').addEventListener('click', () => {
+  state.rave = !state.rave; syncRave();
+  if (state.rave) for (const ch of state.channels) if (!ch.rave) startLevels(ch);
+});
+
 async function startLevels(ch) {
   const r = routeFor(ch.instrument);
   const token = (ch.texToken = (ch.texToken || 0) + 1), url = ch.url;
   const show = (t) => { ch.texState = t; const el = document.querySelector(`.channel[data-id="${CSS.escape(ch.id)}"] .tex-state`); if (el) el.textContent = t; };
   if (ch.texModel !== r?.model) { ch.rave = null; engine.setLevels(ch.id, []); }
   ch.texModel = r?.model ?? '';
+  if (!state.rave) { ch.rave = null; ch.texState = ''; engine.setLevels(ch.id, [], false); renderChannels(); return; } // rendered when RAVE is switched on
   if (!r || !state.song?.id) { renderChannels(); return; }
-  const L = ensureLatent(ch);
-  const latent = isLatentEdited(L) ? { bias: [...L.bias], scale: [...L.scale] } : {};
-  L.dirty = false;
-  document.querySelector(`.channel[data-id="${CSS.escape(ch.id)}"] .lat-apply`)?.classList.remove('dirty');
   try {
     show('…');
-    let job = await (await postJSON('/api/levels', { song_id: state.song.id, src: url, model: r.model, ...latent })).json();
+    let job = await (await postJSON('/api/levels', { song_id: state.song.id, src: url, model: r.model })).json();
     while (job.state !== 'done') {
       if (job.state === 'error') throw new Error(job.message);
       show(job.state === 'queued' ? 'queued' : `${Math.round(job.progress * 100)}%`);
@@ -499,8 +503,9 @@ async function startLevels(ch) {
     if (ch.texToken !== token || ch.url !== url) return;
     ch.rave = job.result; ch.texState = '✓';
     engine.setLevels(ch.id, bufs);
+    engine.setWet(ch.id, wetOf(ch));
     applyColorToLevels();
-    renderChannels(); renderRgbMap(); scheduleViz();
+    renderChannels(); renderRgbMap();
   } catch (err) {
     ch.texState = '!'; renderChannels(); setStatus(err.message, true);
   }
@@ -532,47 +537,13 @@ function renderRgbMap() {
   }).join('');
 }
 
-function afterChannelsChanged() { refreshScopeItems(); syncTransport(); scheduleViz(); }
+function afterChannelsChanged() { refreshScopeItems(); syncTransport(); }
 
 // ---------- ③ set the mood ----------
-function renderGenreBars() {
-  $('genre-bars').innerHTML = state.cfg.genres.map((g) => `
-    <div class="grow" style="--c:${g.color}" title="${esc(g.blurb)}">
-      <span class="gname">${esc(g.name)}</span>
-      <div class="gbar" data-genre="${g.id}" role="slider" tabindex="0" aria-label="${esc(g.name)} share" aria-valuemin="0" aria-valuemax="100" style="--c:${g.color}"><div class="gfill"></div></div>
-      <b data-pct="${g.id}">0%</b>
-    </div>`).join('');
-  for (const bar of document.querySelectorAll('.gbar[data-genre]')) bindBar(bar, (v) => setGenreWeight(bar.dataset.genre, v), () => state.weights[bar.dataset.genre] || 0);
-  bindBar($('strength-bar'), (v) => { state.amount = v; moodChanged(); }, () => state.amount);
-}
-
-function bindBar(el, set, get) {
-  const fromX = (x) => { const r = el.getBoundingClientRect(); set(clamp01((x - r.left) / r.width)); };
-  el.addEventListener('pointerdown', (e) => { el.setPointerCapture(e.pointerId); fromX(e.clientX); });
-  el.addEventListener('pointermove', (e) => { if (el.hasPointerCapture(e.pointerId)) fromX(e.clientX); });
-  el.addEventListener('keydown', (e) => {
-    const step = { ArrowRight: 0.02, ArrowUp: 0.02, ArrowLeft: -0.02, ArrowDown: -0.02, PageUp: 0.1, PageDown: -0.1 }[e.key];
-    if (step === undefined) return;
-    e.preventDefault(); set(clamp01(get() + step));
-  });
-}
-
-// Editing one genre rescales the others so the blend still sums to 100%.
-function setGenreWeight(id, v) {
-  const others = state.cfg.genres.map((g) => g.id).filter((g) => g !== id);
-  const rest = others.reduce((s, g) => s + (state.weights[g] || 0), 0);
-  const w = { [id]: v };
-  for (const g of others) w[g] = rest > 1e-6 ? ((state.weights[g] || 0) / rest) * (1 - v) : (1 - v) / others.length;
-  state.weights = w;
-  const [x] = moodToPad(w);
-  state.pad.x = x;
-  placeMarker(state.pad.x, state.pad.y);
-  moodChanged();
-}
-
 function setPad(x, y) {
   state.pad = { x, y };
   Object.assign(state, padToMood(x, y, state.cfg.genres));
+  if (state.song && !state.song.genre) state.amount = 0; // first decide the song's genre
   placeMarker(x, y);
   applyColorToLevels();
   moodChanged();
@@ -581,18 +552,10 @@ function setPad(x, y) {
 function moodChanged() {
   const { cfg } = state;
   const hex = moodColor(state.weights, state.amount, cfg.genres), m = moodLabel(state.weights, state.amount, cfg.genres);
-  document.documentElement.style.setProperty('--mix', hex);
-  $('mood-label').textContent = m.label; $('mood-desc').textContent = m.desc;
+  document.documentElement.style.setProperty('--mix', hex); state.mixColor = hex;
+  $('mood-label').textContent = m.label;
   const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
   $('swatch').style.color = 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.55 ? '#111' : '#fff';
-  for (const gn of cfg.genres) {
-    const w = state.weights[gn.id] || 0, bar = document.querySelector(`.gbar[data-genre="${gn.id}"]`);
-    bar.style.setProperty('--v', w); bar.setAttribute('aria-valuenow', Math.round(w * 100));
-    document.querySelector(`[data-pct="${gn.id}"]`).textContent = `${Math.round(w * 100)}%`;
-  }
-  $('strength-bar').style.setProperty('--v', state.amount);
-  $('strength-bar').setAttribute('aria-valuenow', Math.round(state.amount * 100));
-  $('strength-val').textContent = `${Math.round(state.amount * 100)}%`;
   requestMood();
 }
 
@@ -602,10 +565,10 @@ async function requestMood() {
   if (moodBusy) { moodPending = true; return; }
   moodBusy = true;
   try {
-    state.mood = await (await postJSON('/api/mood', { weights: state.weights, amount: state.amount, instruments: state.cfg.instruments })).json();
+    state.mood = await (await postJSON('/api/mood', { weights: state.weights, amount: state.amount, instruments: state.cfg.instruments, source: state.song?.genre ?? null })).json();
     for (const ch of state.channels) applyChannel(ch);
-    scope.setMood(state.mood, state.weights);
-    scheduleViz();
+    scope.refresh();
+   
   } catch (err) { setStatus(`Mood model: ${err.message}`, true); }
   moodBusy = false;
   if (moodPending) { moodPending = false; requestMood(); }
@@ -634,63 +597,29 @@ function renderAnchors() {
 function placeMarker(x, y) { marker.style.left = `${x * 100}%`; marker.style.top = `${y * 100}%`; }
 function pickFromPad(e) {
   const r = pad.getBoundingClientRect();
-  setPad(clamp01((e.clientX - r.left) / r.width), clamp01((e.clientY - r.top) / r.height));
+  const x = clamp01((e.clientX - r.left) / r.width), y = clamp01((e.clientY - r.top) / r.height);
+  const snap = nearAnchor(x, y, r.width, r.height); // close to a genre: snap onto it (exactly that genre)
+  if (snap) setPad(...PAD_ANCHORS[snap]); else setPad(x, y);
 }
 pad.addEventListener('pointerdown', (e) => { if (!state.cfg) return; pad.setPointerCapture(e.pointerId); pickFromPad(e); });
 pad.addEventListener('pointermove', (e) => { if (pad.hasPointerCapture(e.pointerId)) pickFromPad(e); });
-
-// ---------- spectrum overlay ----------
-const overlay = $('spectrum-overlay'), specBtn = $('spectrum-btn');
-function openSpectrum(open) {
-  if (open === !overlay.hidden) return;
-  specBtn.setAttribute('aria-expanded', open);
-  if (open) {
-    overlay.hidden = false; overlay.classList.remove('closing');
-    viz.redraw(); scheduleViz(0);
-  } else {
-    overlay.classList.add('closing');
-    overlay.addEventListener('animationend', () => { overlay.hidden = true; overlay.classList.remove('closing'); }, { once: true });
-  }
-}
-specBtn.addEventListener('click', () => openSpectrum(overlay.hidden));
-$('spectrum-close').addEventListener('click', () => openSpectrum(false));
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !overlay.hidden) openSpectrum(false); });
-
-const vizCache = new Map(); // key → Float32Array
-let vizTimer = null, vizVer = 0;
-async function cached(key, fn) { if (!vizCache.has(key)) vizCache.set(key, await fn()); return vizCache.get(key); }
-function scheduleViz(delay = 500) {
-  if (overlay.hidden || !state.song?.buffer) return;
-  clearTimeout(vizTimer);
-  $('viz-status').textContent = 'Updating…';
-  vizTimer = setTimeout(async () => {
-    const ver = ++vizVer;
-    try {
-      const original = await cached(`orig|${state.song.token}`, () => engine.renderBuffer(state.song.buffer, VIZ_SR));
-      const anySolo = state.channels.some((c) => c.solo), layers = [];
-      for (const ch of state.channels) {
-        if (ch.muted || (anySolo && !ch.solo)) continue;
-        const e = engine.channels.get(ch.id), s = state.moodOn ? e.settings : NEUTRAL;
-        $('viz-status').textContent = `Rendering ${ch.instrument}…`;
-        const key = JSON.stringify([ch.url, ch.rave?.levels, e.levels.length && state.moodOn ? [ch.texWet, e.levelPos.toFixed(2)] : 0, ch.gainDb, s]);
-        const x = await cached(key, () => engine.renderChannel(ch.id, VIZ_SR, { bypass: !state.moodOn }));
-        const dry = await cached(`dry|${ch.url}`, () => engine.renderBuffer(e.buffer, VIZ_SR));
-        layers.push({ key: ch.id, title: `${ch.instrument} · ${ch.name}`, sub: state.moodOn ? `with the mood${ch.rave && ch.texWet ? ` + RAVE ${ch.texModel} (z${ch.rave.dim}, ${routeFor(ch.instrument).color})` : ''}` : 'mood off', color: colorOf(ch), x, dry });
-      }
-      if (ver !== vizVer) return;
-      if (vizCache.size > 80) vizCache.clear();
-      await viz.show({ name: state.song.name, moodColor: getComputedStyle(document.documentElement).getPropertyValue('--mix').trim(), original, layers }, true);
-    } catch (err) { console.error(err); $('viz-status').textContent = 'Visualization failed (see console).'; }
-  }, delay);
-}
+// the pad changes size with the layout (e.g. when the band opens beside it): redraw it at its new size
+new ResizeObserver(() => drawPad()).observe(pad);
 
 // ---------- ④ the mood per instrument ----------
 function refreshScopeItems() {
+  // The combined EQ comes first and is shown by default; every channel's EQ is a thumbnail next to it.
+  const mix = { key: MIX, label: 'Mix', mix: true, get color() { return state.mixColor; },
+    chain: { get pre() { return engine.mixStage?.pre; }, get post() { return engine.mixStage?.post; } },
+    editable: !!state.cfg, getBands: () => (state.cfg ? mixBands() : null), edited: () => isEdited(state.mixEq) };
   const items = state.channels.length
     ? state.channels.map((ch) => ({ key: ch.id, label: ch.instrument === ch.id ? ch.instrument : `${ch.instrument} · ${ch.name}`, color: colorOf(ch), instrument: ch.instrument, chain: engine.channels.get(ch.id)?.chain,
-        editable: true, getSettings: () => effective(ch), getMoodSettings: () => settingsFor(ch.instrument), edited: () => isEdited(ch) }))
-    : (state.cfg?.instruments ?? []).map((i) => ({ key: i, label: i, color: INSTRUMENT_COLORS[i] || '#fff', instrument: i }));
-  scope.setItems(items);
+        editable: true, getBands: () => effective(ch).bands, getMoodBands: () => bandsFrom(null, settingsFor(ch.instrument).eq),
+        getSettings: () => settingsFor(ch.instrument), edited: () => isEdited(ch.eqUser) }))
+    // before the stems arrive: what the mood would do to each instrument (read-only)
+    : (state.cfg?.instruments ?? []).map((i) => ({ key: i, label: i, color: INSTRUMENT_COLORS[i] || '#fff', instrument: i,
+        getBands: () => (state.cfg ? bandsFrom(null, settingsFor(i).eq) : null), getSettings: () => settingsFor(i) }));
+  scope.setItems([mix, ...items]);
   syncEqReset();
 }
 
@@ -719,7 +648,7 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Space' && !['INPUT', 'BUTTON', 'SELECT'].includes(e.target.tagName) && !e.target.closest('[role="slider"]')) { e.preventDefault(); togglePlay(); }
 });
 $('loop').addEventListener('change', (e) => engine.setLoop(e.target.checked));
-$('mood-on').addEventListener('change', (e) => { state.moodOn = e.target.checked; engine.setBypass(!state.moodOn); scheduleViz(); });
+$('mood-on').addEventListener('change', (e) => { state.moodOn = e.target.checked; engine.setBypass(!state.moodOn); });
 
 async function exportRender(stems) {
   const btn = stems ? $('stems-btn') : $('export-btn'), label = btn.textContent;
@@ -728,11 +657,12 @@ async function exportRender(stems) {
     const anySolo = state.channels.some((c) => c.solo);
     const body = {
       song_id: state.song.id, stems,
+      mix_eq: state.moodOn ? { bands: mixBands() } : null,
       channels: state.channels.map((ch) => ({
         src: ch.url, name: ch.instrument === ch.id ? ch.instrument : `${ch.instrument}_${ch.name}`,
         settings: state.moodOn ? engine.channels.get(ch.id).settings : NEUTRAL,
         gain_db: ch.gainDb, muted: ch.muted || (anySolo && !ch.solo),
-        texture_wet: ch.rave && state.moodOn ? ch.texWet : 0,
+        texture_wet: ch.rave && state.moodOn ? wetOf(ch) : 0,
         levels: ch.rave ? ch.rave.levels.map((u, i) => [u, levelWeights(ch.rave.levels.length, engine.channels.get(ch.id).levelPos)[i]]) : null,
       })),
     };
@@ -764,7 +694,7 @@ function drawOrb() {
   orbLevel += (target - orbLevel) * (target > orbLevel ? 0.55 : 0.12);
   orbWrap.style.setProperty('--level', orbLevel.toFixed(3));
   const dpr = window.devicePixelRatio || 1, W = orbCanvas.clientWidth * dpr, H = orbCanvas.clientHeight * dpr;
-  if (orbCanvas.width !== W) { orbCanvas.width = W; orbCanvas.height = H; }
+  if (orbCanvas.width !== W || orbCanvas.height !== H) { orbCanvas.width = W; orbCanvas.height = H; }
   const g = orbCanvas.getContext('2d');
   g.clearRect(0, 0, W, H);
   const cx = W / 2, cy = H / 2, orbR = ($('swatch').clientWidth / 2) * (1 + orbLevel * 0.05) * dpr;
@@ -783,6 +713,17 @@ function drawOrb() {
   g.stroke(); g.globalAlpha = 1; g.shadowBlur = 0;
 }
 
+// The song lane pins right under the pinned logo bar, whatever height the bar wraps to.
+new ResizeObserver(([e]) => document.documentElement.style.setProperty('--topbar-h', `${Math.round(e.target.getBoundingClientRect().height)}px`)).observe(document.querySelector('.topbar'));
+
+// The logo beats along: one dot hops per beat (r, g, b, …), the word pulses on the first beat of each bar.
+const brand = $('brand'), brandDots = [...brand.querySelectorAll('.d')];
+function retrigger(el, cls) { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); }
+function beatLogo(beat, downbeat) {
+  retrigger(brandDots[beat % brandDots.length], 'hit');
+  if (downbeat) retrigger(brand, 'down');
+}
+
 function frame() {
   drawOrb();
   const dur = engine.duration, pos = engine.position, frac = dur ? pos / dur : 0;
@@ -795,6 +736,8 @@ function frame() {
     g.globalCompositeOperation = 'source-over'; g.fillStyle = '#fff'; g.fillRect(x - 1, 0, 2 * (window.devicePixelRatio || 1), canvas.height);
     let b = 0;
     while (b < A.beatTimes.length - 1 && A.beatTimes[b + 1] <= pos) b++;
+    if (engine.playing && b !== lastBeat && A.beatTimes[b] <= pos) beatLogo(b, (b + A.barShift) % 4 === 0);
+    lastBeat = engine.playing ? b : -1;
     const bar = engine.playing ? Math.min(A.chords.length - 1, Math.floor((b + A.barShift) / 4)) : -1;
     if (bar !== currentBar) {
       const spans = $('chord-strip').children;
@@ -811,13 +754,12 @@ function frame() {
   }
   $('t-cur').textContent = fmt(pos);
   scope.frame(engine.playing);
-  if (!overlay.hidden) viz.drawPlayhead(frac);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
 
 window.addEventListener('resize', () => {
-  drawWave(); drawPad(); viz.redraw();
+  drawWave(); drawPad();
   document.querySelectorAll('.channel[data-id]').forEach((row) => drawChannelWave(state.channels.find((c) => c.id === row.dataset.id), row.querySelector('canvas')));
 });
 

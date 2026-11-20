@@ -1,7 +1,11 @@
 """Mood → mix settings.
 
 A *mood* is a weighted blend of genres plus a strength (0 = leave the song as it is, 1 = full mood).
-The model turns a mood into one *settings vector* per instrument:
+The song's own genre (you pick it when the song loads) is the starting point: the mix moves FROM that genre
+TOWARD the mood, so only the difference is applied. EQ and level move both ways; width scales by the ratio;
+compression, saturation and reverb can only be added (what is baked into a recording can't be taken out).
+With no song genre the start is NEUTRAL (= treat the recording as a blank slate).
+The model turns a mood into one *settings vector* per instrument (the processing to apply):
 
     eq      5 gains in dB for the bands in SCHEMA['bands']   (low shelf, 3 peaks, high shelf)
     comp    0..1  compression amount     (threshold/ratio/makeup formulas in js/dsp.js and render.py)
@@ -11,7 +15,7 @@ The model turns a mood into one *settings vector* per instrument:
     level   dB    level offset
 
 PLUGIN POINT. `PlaceholderMoodModel` uses hand-tuned presets and a linear blend. A trained model only has to
-implement the same three methods (`settings`, `embed`, `genre_points`), e.g.:
+implement the same methods (`settings(weights, amount, instrument, source)`, `embed`, `origin`, `genre_points`), e.g.:
   v1  per (genre, instrument) average features of Demucs stems from genre-tagged songs → least-squares fit
       of EQ gains / compression to the difference from the instrument's all-genre average.
   v2  instrument-conditioned VAE over those features; the mood point is the weighted blend of genre
@@ -129,17 +133,43 @@ class PlaceholderMoodModel:
     def _inst(self, instrument: str) -> str:
         return instrument if instrument in self.presets else 'other'
 
-    def settings(self, weights: dict, amount: float, instrument: str) -> dict:
+    def _start(self, i: str, source: str | None) -> np.ndarray:
+        return self.presets[i][source] if source in GENRE_IDS else self.neutral
+
+    def point(self, weights: dict, amount: float, instrument: str, source: str | None = None) -> np.ndarray:
+        """Where the song ends up (absolute genre character): from its own genre toward the mood."""
         i = self._inst(instrument)
         w = np.array([max(0.0, float(weights.get(g, 0))) for g in GENRE_IDS])
         w = w / w.sum() if w.sum() > 0 else w
-        target = sum(wk * self.presets[i][g] for wk, g in zip(w, GENRE_IDS)) if w.sum() > 0 else self.neutral
-        amount = float(np.clip(amount, 0, 1))
-        return from_vec(self.neutral + amount * (target - self.neutral))
+        start = self._start(i, source)
+        target = sum(wk * self.presets[i][g] for wk, g in zip(w, GENRE_IDS)) if w.sum() > 0 else start
+        return start + float(np.clip(amount, 0, 1)) * (target - start)
+
+    def settings(self, weights: dict, amount: float, instrument: str, source: str | None = None) -> dict:
+        """The processing that takes the recording (in genre `source`) to the mood."""
+        i = self._inst(instrument)
+        p, start = self.point(weights, amount, i, source), self._start(i, source)
+        d = p - start
+        v = d.copy()
+        v[5:8] = np.maximum(0.0, d[5:8])                      # comp, sat, reverb: can only add
+        v[8] = p[8] / start[8] if start[8] > 1e-6 else p[8]   # width: ratio to the recording's width
+        return from_vec(v)
+
+    def embed_vec(self, v: np.ndarray, instrument: str) -> list:
+        mu, P = self.pca[self._inst(instrument)]
+        return [float(x) for x in P @ (v / _SCALE - mu)]
 
     def embed(self, s: dict, instrument: str) -> list:
-        mu, P = self.pca[self._inst(instrument)]
-        return [float(x) for x in P @ (to_vec(s) / _SCALE - mu)]
+        return self.embed_vec(to_vec(s), instrument)
+
+    def position(self, weights: dict, amount: float, instrument: str, source: str | None = None) -> list:
+        """The mood's point on the genre map (absolute, not the processing)."""
+        return self.embed_vec(self.point(weights, amount, instrument, source), instrument)
+
+    def origin(self, instrument: str, source: str | None = None) -> list:
+        """The recording's point on the genre map: its genre, or 'as recorded' (neutral)."""
+        i = self._inst(instrument)
+        return self.embed_vec(self._start(i, source), i)
 
     def genre_points(self, instrument: str) -> dict:
         i = self._inst(instrument)
