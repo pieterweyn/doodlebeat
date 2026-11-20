@@ -44,6 +44,23 @@ A trained model only needs the same three methods: `settings`, `embed` and `genr
 - **v1:** collect genre-tagged songs and split them with Demucs, so each stem is labelled by genre and instrument. Measure each stem's ⅓-octave spectrum, crest factor, loudness range and stereo width. Then fit EQ gains and compression to the difference from that instrument's average across all genres.
 - **v2:** an instrument-conditioned VAE over those features. A mood is the weighted blend of genre centroids in the latent space, decoded into settings. Train it through differentiable DSP (e.g. `dasp-pytorch`).
 
+## Color → RAVE
+
+Each channel goes through a fixed RAVE model, and one component of the pad's color drives it:
+
+| Color | Model | Channels |
+| --- | --- | --- |
+| **R** | Isis | vocals |
+| **G** | Musicnet | piano |
+| **B** | Sol ordinario fast | every other channel (drums, bass, guitar, other, added channels) |
+
+When the stems are ready, the server does two things for each channel (`/api/levels`, `server/texture.py`):
+
+1. **Picks one latent dimension.** It sweeps every dimension by ±2 on the stem's loudest 8 seconds, measures how brightness, loudness and noisiness change, and picks the dimension with the strongest clean effect. The shift is scaled so that R, G and B feel equally strong. The direction is flipped where needed, so that more of a color always means brighter, louder or noisier.
+2. **Renders 3 levels along it** (shift −, 0, +) in one batched decode.
+
+Moving the color crossfades between those levels live in the browser. The ±RAVE slider on each channel sets how much of the RAVE version is mixed with the dry stem. The sliders button opens the remaining latent dimensions for manual shift and scale. The color-driven dimension is shown there but locked.
+
 ## RAVE texture
 
 Each channel can be passed through a pretrained RAVE model. The integration follows the RAVE docs (<https://acids-rave.readthedocs.io>):

@@ -35,6 +35,16 @@ app = FastAPI(title='doodlebeat')
 MODEL = mood_model.load_model()
 
 
+@app.middleware('http')
+async def revalidate_page_files(request, call_next):
+    """Browsers must re-check page files (html/js/css) so code changes show up on a normal reload.
+    Audio under /work never changes once written, so it keeps normal caching."""
+    response = await call_next(request)
+    if not request.url.path.startswith('/work/'):
+        response.headers['Cache-Control'] = 'no-cache'
+    return response
+
+
 def _song_dir(song_id: str) -> Path:
     if not re.fullmatch(r'[0-9a-f]{10}', song_id) or not (WORK / song_id).is_dir():
         raise HTTPException(404, 'Unknown song. Load the song again.')

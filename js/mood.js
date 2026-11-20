@@ -60,9 +60,9 @@ export function moodColor(weights, amount, genres) {
 }
 
 export function moodLabel(weights, amount, genres) {
-  if (amount < 0.05) return { label: 'As recorded', desc: 'Pure white or black leaves the song untouched. Move toward a color.' };
+  if (amount < 0.05) return { label: 'As recorded', desc: '0% strength' };
   const top = genres.map((g) => ({ g, w: weights[g.id] || 0 })).filter((t) => t.w > 0.12).sort((a, b) => b.w - a.w).slice(0, 2);
-  const label = top.map((t) => t.g.name).join(' × ');
+  const label = top.map((t) => t.g.name.replace(/-/g, '\u2011')).join(' × '); // no line break inside 'Hip-hop'
   const desc = top.length > 1 ? `${Math.round(top[0].w * 100)} · ${Math.round(top[1].w * 100)} blend` : top[0].g.blurb;
   return { label, desc: `${desc} · ${Math.round(amount * 100)}% strength` };
 }

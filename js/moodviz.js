@@ -140,6 +140,14 @@ export class MoodScope {
       g.fillStyle = 'rgba(255,255,255,.45)'; g.fillText(`${db > 0 ? '+' : ''}${db} dB`, W - padR + 6 * dpr, Ydb(db));
     }
 
+    // axis symbols: f (frequency) along x, G (gain, dB) along y
+    g.font = `italic 600 ${15 * dpr}px "Bodoni Moda", Georgia, serif`;
+    g.fillStyle = 'rgba(255,255,255,.8)';
+    g.textBaseline = 'top';
+    g.fillText('f', padL + 4 * dpr, H - padB + 3 * dpr);       // start of the frequency axis
+    g.fillText('G', W - padR + 10 * dpr, 14 * dpr);            // above the dB scale, clear of the frame
+    g.font = `${10 * dpr}px Manrope, system-ui, sans-serif`;
+
     const item = this.current();
     // live spectra of the selected channel: before (gray) → after (color)
     if (playing && item?.chain?.pre) {
@@ -184,10 +192,6 @@ export class MoodScope {
         g.fillText(b.label, x, y - 11 * dpr); g.textAlign = 'left';
       });
     }
-    if (!playing) {
-      g.fillStyle = 'rgba(255,255,255,.35)'; g.textBaseline = 'top';
-      g.fillText('press play to see the live spectrum', padL + 8 * dpr, padT + 6 * dpr);
-    }
   }
 
   drawLatent() {
@@ -198,7 +202,7 @@ export class MoodScope {
     g.clearRect(0, 0, W, H);
     if (!cfg || !item) return;
     const inst = cfg.latent[item.instrument] ? item.instrument : 'other', pts = cfg.latent[inst];
-    this.latentSub.textContent = `· ${inst} · ${cfg.model.trained ? 'learned latent' : 'placeholder: PCA of presets'}`;
+    this.latentSub.textContent = `· ${inst}`;
     const all = Object.values(pts);
     const xs = all.map((p) => p[0]), ys = all.map((p) => p[1]);
     const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);

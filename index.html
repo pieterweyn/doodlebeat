@@ -31,7 +31,7 @@
     <section id="lane" class="lane" tabindex="0">
       <div id="lane-empty" class="lane-empty">
         <div class="lane-icon">♫</div>
-        <div><strong>Select or drop a song</strong><br><span>It is split into stems automatically · wav · mp3 · flac · m4a</span></div>
+        <div><strong>Select or drop a song</strong><br><span>wav · mp3 · flac · m4a</span></div>
       </div>
       <div id="track-info" class="track-info hidden">
         <canvas id="wave"></canvas>
@@ -46,13 +46,11 @@
     <section id="band" class="band hidden">
       <div class="section-head">
         <h2 class="fancy">The band</h2>
-        <span class="section-sub">Every stem is a channel. Replace one with your own recording or add more.</span>
       </div>
       <div id="channels" class="channels"></div>
       <div class="band-foot">
         <input type="file" id="channel-input" accept="audio/*,video/*" hidden>
-        <button id="add-channel" class="pill ghost">＋ Add channel</button>
-        <span class="hint">New audio starts at 0:00 and is trimmed or padded to the song's length.</span>
+        <button id="add-channel" class="pill ghost" title="New audio starts at 0:00 and is trimmed or padded to the song's length">＋ Add channel</button>
       </div>
     </section>
 
@@ -74,7 +72,6 @@
               <div id="strength-bar" class="gbar" role="slider" tabindex="0" aria-label="Mood strength" aria-valuemin="0" aria-valuemax="100"><div class="gfill"></div></div>
               <b id="strength-val">0%</b>
             </div>
-            <p id="model-note" class="hint"></p>
           </div>
           <div class="palette">
             <div class="orb-wrap">
@@ -83,12 +80,14 @@
                 <div class="orb-text"><div id="mood-label" class="mood-label"></div><div id="mood-desc" class="mood-desc"></div></div>
               </div>
             </div>
-            <div class="pad-wrap">
-              <canvas id="color-pad" class="color-pad" aria-label="Mood color: drag to choose"></canvas>
-              <div id="pad-anchors" class="pad-anchors"></div>
-              <div id="pad-marker" class="pad-marker"></div>
+            <div class="pad-col">
+              <div class="pad-wrap">
+                <canvas id="color-pad" class="color-pad" aria-label="Mood color: drag to choose"></canvas>
+                <div id="pad-anchors" class="pad-anchors"></div>
+                <div id="pad-marker" class="pad-marker"></div>
+              </div>
+              <div id="rgb-map" class="rgb-map" aria-label="What each color component controls"></div>
             </div>
-            <div id="rgb-map" class="rgb-map" aria-label="What each color component controls"></div>
           </div>
         </div>
       </section>
@@ -98,7 +97,6 @@
       <section id="spectrum-overlay" class="spectrum-overlay" role="dialog" aria-label="Spectral view" hidden>
         <div class="studio-head">
           <h2 class="fancy">Spectral view</h2>
-          <span class="studio-sub">waveform & spectrogram: original → each channel with its mood → the mood mix</span>
           <span id="viz-status" class="status"></span>
           <button id="spectrum-close" class="close" aria-label="Close spectral view">✕</button>
         </div>
@@ -109,7 +107,7 @@
           <span class="viz-range"></span>
           <span class="viz-help">scroll or pinch to zoom · drag to pan · double-click to reset · click to seek</span>
         </div>
-        <div id="viz" class="viz"><p class="hint">Load a song to see each channel's waveform and spectrogram.</p></div>
+        <div id="viz" class="viz"><p class="hint">No song yet.</p></div>
       </section>
     </div>
 
@@ -117,16 +115,14 @@
     <section class="scope" id="scope">
       <div class="section-head">
         <h2 class="fancy">The mood, per instrument</h2>
-        <span class="section-sub">EQ curve, live spectrum before → after, dynamics & space, and where the mood sits in the genre map.</span>
       </div>
       <div id="scope-chips" class="scope-chips"></div>
       <div class="scope-grid">
         <div class="scope-main">
-          <canvas id="eq-canvas" class="eq-canvas" aria-label="EQ curve and live spectrum"></canvas>
+          <div class="eq-box"><canvas id="eq-canvas" class="eq-canvas" aria-label="EQ curve and live spectrum"></canvas></div>
           <div class="eq-legend">
             <span><i class="pre"></i>before</span><span><i class="post"></i>after</span><span><i class="curve"></i>EQ</span><span><i class="dash"></i>mood only</span>
-            <span class="eq-help">drag a dot: up/down = gain, left/right = frequency · double-click resets it</span>
-            <button id="eq-reset" class="pill ghost small" disabled>Reset EQ</button>
+            <button id="eq-reset" class="pill ghost small eq-reset" disabled title="Drag a dot: up/down = gain, left/right = frequency · double-click a dot resets it">Reset EQ</button>
           </div>
         </div>
         <div class="scope-side">
@@ -138,6 +134,18 @@
         </div>
       </div>
     </section>
+
+    <footer class="credits">
+      <h3 class="fancy">References</h3>
+      <p><b>RAVE</b> · A. Caillon &amp; P. Esling, “RAVE: A variational autoencoder for fast and high-quality neural audio synthesis,” arXiv:2111.05011, 2021 ·
+        <a href="https://github.com/acids-ircam/RAVE" target="_blank" rel="noopener">github.com/acids-ircam/RAVE</a> ·
+        <a href="https://acids-rave.readthedocs.io/" target="_blank" rel="noopener">documentation</a></p>
+      <p><b>Pretrained RAVE models</b> · ACIDS, IRCAM ·
+        <a href="https://acids-ircam.github.io/rave_models_download" target="_blank" rel="noopener">acids-ircam.github.io/rave_models_download</a> ·
+        Isis (ISiS singing voice), Musicnet (MusicNet), Sol ordinario fast (IRCAM Studio OnLine) by Axel Chemla--Romeu-Santos, 2023</p>
+      <p><b>Demucs</b> · Hybrid Transformer Demucs (v4), A. Défossez, S. Rouard &amp; F. Massa, Meta AI ·
+        <a href="https://github.com/adefossez/demucs" target="_blank" rel="noopener">github.com/adefossez/demucs</a></p>
+    </footer>
   </main>
 
   <footer class="transport">

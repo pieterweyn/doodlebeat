@@ -73,7 +73,7 @@ async function init() {
   engine.setSchema(cfg.schema);
   scope.setConfig(cfg);
   $('sep-model').innerHTML = cfg.separation.models.map((m) => `<option value="${m.id}"${m.id === cfg.separation.default ? ' selected' : ''}>${esc(m.label)}</option>`).join('');
-  $('model-note').textContent = `Mood model: ${cfg.model.trained ? 'trained' : 'placeholder'}. ${cfg.model.description}`;
+  $('strength-bar').closest('.genres').title = `Mood model: ${cfg.model.trained ? 'trained' : 'placeholder'}. ${cfg.model.description}`;
   renderGenreBars();
   renderAnchors();
   drawPad();
@@ -337,8 +337,7 @@ function latentPanel(ch) {
   }).join('');
   return `<div class="latent-panel">
     <div class="lp-head">
-      <div><b>${esc(m.name)}</b> · ${L.bias.length} latent dimensions<br>
-        <span class="hint">The color moves the highlighted dimension live. The others are yours: <b>shift</b> moves the sound along a dimension; <b>scale</b> below 1 makes it more generic, above 1 exaggerates it. Then press Render.</span></div>
+      <div title="The color moves the highlighted dimension live. Shift moves the sound along a dimension; scale below 1 makes it more generic, above 1 exaggerates it. Then press Render."><b>${esc(m.name)}</b> · ${L.bias.length} latent dimensions</div>
       <div class="lp-actions">
         <button class="pill ghost small" data-act="lat-random" title="Random shifts on the strongest dimensions">Random</button>
         <button class="pill ghost small" data-act="lat-reset">Reset</button>
