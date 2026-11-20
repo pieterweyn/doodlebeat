@@ -1,10 +1,10 @@
-// Stage-by-stage visualization: Input → +Red → +Green → +Blue (= final mix), each with a
-// labelled waveform + log-frequency spectrogram, plus a consolidated channel-colored spectrogram.
+// Spectral view: Original → each channel with its mood → the mood mix, each with a labelled waveform +
+// log-frequency spectrogram, plus a consolidated spectrogram colored by channel.
 // All rows share one zoomable/pannable time view; zooming recomputes a sharp spectrogram for the window.
 import { fft } from './analysis.js';
-import { CHANNELS, CHANNEL_ORDER } from './semantics.js';
 
-const SR = 22050, N = 2048, FMIN = 30, FMAX = 11000, DB_RANGE = 80;
+export const VIZ_SR = 22050;
+const SR = VIZ_SR, N = 2048, FMIN = 30, FMAX = 11000, DB_RANGE = 80;
 const COLS = 900, ROWS = 160;
 const ROW_H = 176, WAVE_H = 40, SPEC_Y = 50, GUTTER = 36;
 const MIN_SPAN_SEC = 0.25;
@@ -83,55 +83,28 @@ function niceStep(span) {
 export class Visualizer {
   constructor(container, statusEl, toolbarEl) {
     this.el = container; this.statusEl = statusEl; this.toolbar = toolbarEl;
-    this.ver = 0; this.rows = []; this.baseFor = null; this.stemCache = {};
+    this.rows = []; this.layers = [];
     this.view = { a: 0, b: 1 }; this.detail = null; this.onSeek = null;
-    this.enabled = { base: true, R: true, G: true, B: true }; // layers shown in the consolidated plot
+    this.enabled = { base: true }; // layers shown in the consolidated plot
     this.bindInteractions();
   }
   status(msg) { this.statusEl.textContent = msg; }
 
-  async update(snap) {
-    const ver = ++this.ver;
-    this.status('Rendering channel stems…');
-    if (this.baseFor !== snap.buffer) {
-      this.base = await snap.engine.renderBaseMono(SR);
-      this.baseFor = snap.buffer; this.stemCache = {}; this.view = { a: 0, b: 1 };
-    }
-    const stems = {};
-    await Promise.all(CHANNEL_ORDER.map(async (ch) => {
-      const tr = snap.tracks[ch];
-      if (!tr) return (stems[ch] = null);
-      const m = snap.mood;
-      const key = [tr.id, tr.level.toFixed(3), m.extension, m.tone.toFixed(3), m.reverb.toFixed(3)].join('|');
-      if (this.stemCache[ch]?.key !== key) {
-        this.stemCache[ch] = { key, data: await snap.engine.renderStem({ id: tr.id, channel: ch, level: tr.level }, m, SR) };
-      }
-      stems[ch] = this.stemCache[ch].data;
-    }));
-    if (ver !== this.ver) return; // a newer update superseded this one
+  // snap: { name, moodColor, original: Float32Array, layers: [{ key, title, sub, color, x, dry }] }, mono at SR
+  async show(snap, keepView = false) {
     this.status('Computing spectrograms…');
     await new Promise((r) => setTimeout(r, 0));
-    this.build(snap, stems);
+    if (!keepView || this.len !== snap.original.length) this.view = { a: 0, b: 1 };
+    this.build(snap);
     this.status('');
   }
 
-  build(snap, stems) {
-    const base = this.base, len = base.length;
-    const stages = [{ title: 'Input', sub: `${snap.name} · original at 100%`, color: INPUT_COLOR, x: base }];
-    let acc = new Float32Array(len);
-    for (let i = 0; i < len; i++) acc[i] = base[i] * snap.baseVol;
-    CHANNEL_ORDER.forEach((ch, k) => {
-      const C = CHANNELS[ch], tr = snap.tracks[ch], s = stems[ch];
-      const next = new Float32Array(acc);
-      if (s) for (let i = 0; i < len; i++) next[i] += s[i] || 0;
-      stages.push({
-        title: `+ ${C.name} · ${C.meaning}` + (k === 2 ? '  =  Final mix' : ''),
-        sub: (tr ? `${tr.icon} ${tr.name} at ${Math.round(tr.level * 100)}%` : 'no instrument, unchanged') +
-          (k === 0 ? ` · original at ${Math.round(snap.baseVol * 100)}%` : ''),
-        color: C.color, x: next,
-      });
-      acc = next;
-    });
+  build(snap) {
+    const len = snap.original.length, mix = new Float32Array(len);
+    for (const L of snap.layers) for (let i = 0; i < len; i++) mix[i] += L.x[i] || 0;
+    const stages = [{ title: 'Original', sub: `${snap.name} · as recorded`, color: INPUT_COLOR, x: snap.original }];
+    for (const L of snap.layers) stages.push({ title: L.title, sub: L.sub, color: L.color, x: L.x, dry: L.dry });
+    if (snap.layers.length) stages.push({ title: 'Mood mix', sub: 'every channel with the mood applied (before the bus compressor)', color: snap.moodColor, x: mix, vsOriginal: true });
 
     const fullM = stages.map((st) => stft(st.x));
     let ref = 1e-9, peak = 1e-9;
@@ -141,17 +114,19 @@ export class Visualizer {
     });
     stages.forEach((st, i) => {
       st.stats = stats(st.x, fullM[i]);
-      if (i > 0) st.delta = { db: st.stats.rmsDb - stages[i - 1].stats.rmsDb, hz: st.stats.centroid - stages[i - 1].stats.centroid };
+      const before = st.dry ? stats(st.dry, stft(st.dry)) : st.vsOriginal ? stages[0].stats : null;
+      if (before) st.delta = { db: st.stats.rmsDb - before.rmsDb, hz: st.stats.centroid - before.centroid };
     });
+    for (const L of snap.layers) this.enabled[L.key] ??= true;
     const composite = {
       title: 'Consolidated · color-coded by channel',
-      sub: 'gray = original · color = energy each channel adds at that time & frequency. Toggle layers on the right.',
+      sub: 'gray = original · color = each channel after the mood. Toggle layers on the right.',
       color: 'conic-gradient(var(--r), var(--g), var(--b), var(--r))',
       composite: true,
-      legend: [['base', INPUT_COLOR, 'Original']].concat(CHANNEL_ORDER.map((ch) => [ch, CHANNELS[ch].color, `${CHANNELS[ch].name}: ${snap.tracks[ch]?.name ?? 'none'}`])),
+      legend: [['base', INPUT_COLOR, 'Original']].concat(snap.layers.map((L) => [L.key, L.color, L.title])),
     };
 
-    Object.assign(this, { stages, stems, ref, peak, len, composite, baseVol: snap.baseVol, duration: len / SR });
+    Object.assign(this, { stages, layers: snap.layers, ref, peak, len, composite, duration: len / SR });
     composite.x = this.compositeSignal();
     this.overview = this.images(0, len, fullM);
     this.detail = null;
@@ -162,21 +137,20 @@ export class Visualizer {
   // Spectrogram images for samples [a, b): one per stage + the composite.
   images(a, b, stageMs) {
     stageMs ??= this.stages.map((st) => stft(st.x, a, b));
-    const stemMs = CHANNEL_ORDER.map((ch) => (this.stems[ch] ? stft(this.stems[ch], a, b) : null));
     const imgs = stageMs.map((M) => makeImage((j) => inferno(level(M[j], this.ref))));
-    const baseM = stageMs[0];
-    imgs.push(this.compositeImage(baseM, stemMs));
-    return { a: a / this.len, b: b / this.len, imgs, baseM, stemMs };
+    const baseM = stageMs[0], layerMs = this.layers.map((_, k) => stageMs[k + 1]);
+    imgs.push(this.compositeImage(baseM, layerMs));
+    return { a: a / this.len, b: b / this.len, imgs, baseM, layerMs };
   }
 
-  compositeImage(baseM, stemMs) {
-    const cols = CHANNEL_ORDER.map((ch) => hexRgb(CHANNELS[ch].color));
-    const { ref, baseVol, enabled } = this;
+  compositeImage(baseM, layerMs) {
+    const cols = this.layers.map((L) => hexRgb(L.color));
+    const { ref, enabled, layers } = this;
     return makeImage((j) => {
-      const g = enabled.base ? 150 * level(baseM[j] * baseVol, ref) ** 2 : 0;
+      const g = enabled.base ? 150 * level(baseM[j], ref) ** 2 : 0;
       let R = g, G = g, B = g;
-      stemMs.forEach((M, k) => {
-        if (!M || !enabled[CHANNEL_ORDER[k]]) return;
+      layerMs.forEach((M, k) => {
+        if (!enabled[layers[k].key]) return;
         const v = level(M[j], ref) ** 2;
         R += cols[k][0] * v; G += cols[k][1] * v; B += cols[k][2] * v;
       });
@@ -187,17 +161,14 @@ export class Visualizer {
   // Sum of the enabled layers (for the consolidated waveform)
   compositeSignal() {
     const out = new Float32Array(this.len);
-    if (this.enabled.base) for (let i = 0; i < this.len; i++) out[i] = this.base[i] * this.baseVol;
-    for (const ch of CHANNEL_ORDER) {
-      const s = this.stems[ch];
-      if (s && this.enabled[ch]) for (let i = 0; i < this.len; i++) out[i] += s[i] || 0;
-    }
+    if (this.enabled.base) out.set(this.stages[0].x.subarray(0, this.len));
+    for (const L of this.layers) if (this.enabled[L.key]) for (let i = 0; i < this.len; i++) out[i] += L.x[i] || 0;
     return out;
   }
 
   toggleLayer(key) {
     this.enabled[key] = !this.enabled[key];
-    for (const src of [this.overview, this.detail]) if (src) src.imgs[src.imgs.length - 1] = this.compositeImage(src.baseM, src.stemMs);
+    for (const src of [this.overview, this.detail]) if (src) src.imgs[src.imgs.length - 1] = this.compositeImage(src.baseM, src.layerMs);
     this.composite.x = this.compositeSignal();
     this.el.querySelectorAll(`[data-layer="${key}"]`).forEach((b) => b.classList.toggle('on', this.enabled[key]));
     this.redraw();

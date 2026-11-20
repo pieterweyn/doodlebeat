@@ -1,46 +1,77 @@
 # doodlebeat
 
-Upload a beat, pick three instruments, and use color to re-arrange it.
+Select a song, set the mood, press play.
+
+doodlebeat splits a song into stems, and each stem becomes a channel. A mood is a blend of genres that you pick with a color. A mood model turns that blend into mix settings for each instrument: EQ, compression, saturation, reverb, stereo width and level. You hear the result live and can render the final mix or the processed stems.
 
 ## Run
 
+From the project folder (the one that contains `.venv`):
+
 ```bash
-cd doodlebeat
-python3 -m http.server 8000
+.venv/bin/python -m pip install fastapi "uvicorn[standard]" python-multipart pedalboard   # once; demucs + torch are already in .venv
+.venv/bin/python doodlebeat/server/app.py
 # open http://localhost:8000
 ```
 
-There are no dependencies and no build step. It uses vanilla JS ES modules and the Web Audio API. The page needs to be served over HTTP, because ES modules don't load from `file://`.
+The server needs `ffmpeg` on the PATH to read MP3 or M4A files.
 
-## How it works
+## The pipeline
 
-1. **Load a track**: use the top bar, drop a file anywhere on the page, or click "Demo beat". The app analyzes the track in the browser for beats, BPM, key, the chord in each bar, the melody pitch on each beat, energy, and onsets. The track's waveform and chords appear in the strip under the top bar.
-2. **Paint the sound**: this is the main step. There are three channel strips (Red · Energy, Green · Flow, Blue · Depth). Each strip has an instrument picker that draws from a pool of 6 instruments: Drums, Violin, Trumpet, Piano, Guitar, and Bass. Picking an instrument that's already on another strip swaps the two. Each strip also has a vertical fader. The faders, the glowing color orb, and the color pad under it are all linked, so moving any one of them updates the others.
-   - **Red · Energy**: rhythmic stabs, accents and a higher register.
-   - **Green · Flow**: melody and arpeggios that follow the song's harmony.
-   - **Blue · Depth**: long, low, spacious tones with more reverb.
-   - The **intensity** of a channel sets how much its instrument contributes. It controls volume, and as it rises the instrument also gets busier.
-   - The **mixed color** sets the global mood. Hue picks the chord color (add9, 6, 7, or 7+9), and lightness and saturation set tone brightness and reverb.
-3. **Spectral view**: the changes are shown as a chain: Input → + Red → + Green → + Blue (= final mix). Each row is tinted in its channel's color and has a labelled waveform and log-frequency spectrogram. It also shows loudness and brightness, and how much each changed from the row before. The consolidated plot at the end shows the original in gray and each channel's added energy in its own color, with toggles to show or hide each layer. To zoom, scroll or pinch; to pan, drag; double-click resets the view. The waveforms always show the whole track, with a window marking the zoomed range that you can drag to move the zoom.
+1. **Select a song.** Use the top bar or drop a file anywhere on the page. The server splits it with Demucs, using the same code as `notebooks & huggingfaces/1 · Split a song into stems (Demucs).ipynb`. The default model is `htdemucs_6s` (vocals, drums, bass, guitar, piano, other). The dropdown also offers `htdemucs` (4 stems, fast) and `htdemucs_ft` (4 stems, cleanest). While the split runs, Play uses the original song. When the stems are ready, playback switches to them.
+2. **The band.** Each stem is a channel. For each channel you can:
+   - Set its instrument type, which decides the mood profile it gets.
+   - Mute, solo and set its level.
+   - **Replace** it with another recording (⇄) and go back to the original stem (↺).
+   - **Add** more channels.
 
-## Color → feeling mapping: where it comes from
+   New audio starts at 0:00 and is trimmed or padded to the song's length.
+3. **Set the mood.** Each genre (Lo-fi, Jazz, Rock, EDM, Hip-hop, Cinematic) has an anchor on the color pad. Each point on the pad is a blend of nearby genres. Pure colors give full strength, and the strength fades toward white or black, where the song is left as recorded. You can fine-tune the blend and the strength with the bars.
+   - **Spectrum** opens the waveform/spectrogram view below the stage. It shows the original, each channel with its mood, the mood mix, and a consolidated view colored by channel.
+4. **The mood, per instrument.** For each channel this section shows:
+   - The EQ curve, drawn over the live spectrum before and after processing.
+   - Bars for compression, saturation, reverb, width and level.
+   - The **genre map**, which shows where the current mood sits between the genres for that instrument.
+   - **Hand EQ:** drag a band's dot up or down to change its gain, and left or right to move its frequency (up to 2 octaves either way). Double-click a dot to reset that band. Your edits are offsets on top of the mood, so the mood can keep changing underneath them. The dashed curve shows what the mood alone would do. **Reset EQ** clears all edits for the selected channel.
+5. **Play, compare, export.** The *Mood* switch compares the mood with the song as recorded. **Render mix** renders a full-quality WAV on the server with pedalboard. **Stems for GarageBand** gives a ZIP of the processed stems. They are aligned at 0:00, so you can drop them onto GarageBand tracks. GarageBand can't be controlled from code, so it only gets these files.
 
-The mapping in `js/semantics.js` (hue ranges, mood names, chord extensions, the tone and reverb formulas) is a **hand-tuned heuristic**. It was not fitted to data. It loosely follows these findings:
+## Mood model (placeholder)
 
-- Palmer, Schloss, Xu & Prado-León (2013), *Music–color associations are mediated by emotion*, PNAS 110(22). People pair faster, major-key music with lighter, more saturated, yellower colors, and slower, minor-key music with darker, desaturated, bluer colors. This is the basis for blue meaning melancholic or minor-leaning and yellow meaning sunny. It is also why lightness and saturation control brightness and reverb.
-- Whiteford, Schloss, Helwig & Palmer (2018), *Color, music, and emotion: Bach to the blues*, i-Perception 9(6). This study replicates the emotion-mediated music↔color link across genres.
-- Valdez & Mehrabian (1994), *Effects of color on emotions*, J. Exp. Psychology: General 123(4). Saturation and brightness predict arousal and pleasantness more strongly than hue does.
-- Jonauskaite et al. (2020), *Universal patterns in color-emotion associations*, Psychological Science 31(10). Red is linked to love and anger (high arousal) and yellow to joy across 30 nations. This is the basis for red meaning fiery or energetic.
+`server/mood_model.py` takes a genre blend and a strength and returns one settings vector per instrument (see `SCHEMA`). The current model, `PlaceholderMoodModel`, uses **hand-tuned** genre × instrument presets and blends them linearly. Its genre map is a PCA of those presets. Nothing in it is learned yet.
 
-Some choices have **no empirical source** and are common music-production conventions or my own choices. These are the specific mood labels ("Fiery", "Dreamy", …), the chord colors (add9 sounds bright, 7ths moody, 6ths sweet, 7+9 lush), and the channel roles (Red = Energy, Green = Flow, Blue = Depth). The AI plugin stage is the natural place to replace them with a mapping learned from data.
+A trained model only needs the same three methods: `settings`, `embed` and `genre_points`. Select it with `DOODLEBEAT_MODEL`. The plan:
 
-## Architecture / plugin points
+- **v1:** collect genre-tagged songs and split them with Demucs, so each stem is labelled by genre and instrument. Measure each stem's ⅓-octave spectrum, crest factor, loudness range and stereo width. Then fit EQ gains and compression to the difference from that instrument's average across all genres.
+- **v2:** an instrument-conditioned VAE over those features. A mood is the weighted blend of genre centroids in the latent space, decoded into settings. Train it through differentiable DSP (e.g. `dasp-pytorch`).
 
-| File | Role | Swap for |
-| --- | --- | --- |
-| `js/analysis.js` | FFT, onset envelope, DP beat tracker, key, chords | librosa / madmom / basic-pitch backend |
-| `js/semantics.js` | color → roles & mood | AI color→music mapping / text prompt |
-| `js/arranger.js` | per-16th note generation for each instrument | symbolic AI model / MusicGen-style generation |
-| `js/instruments.js` | Web Audio synths | samples, soundfonts, neural timbre |
-| `js/engine.js` | live scheduler + offline WAV render + per-channel stem render | — |
-| `js/visualize.js` | stage waveforms, spectrograms, channel-colored composite | — |
+## RAVE texture
+
+Each channel can be passed through a pretrained RAVE model. The integration follows the RAVE docs (<https://acids-rave.readthedocs.io>):
+
+- **Streaming exports:** consecutive blocks are fed in order, so the convolution caches carry over between blocks and there are no clicks.
+- **Stereo:** mono models run once per channel.
+- **Input level:** every stem goes in at −20 dBFS RMS, because RAVE reacts strongly to input level.
+- **Repeatability:** a fixed seed, since the decoder fills unused latent dimensions with noise.
+- **Output level:** matched to the dry stem's loudness, with peaks soft-limited.
+
+A model can only re-voice a stem in the sound world it was trained on. The dropdown marks models that suit the channel's instrument with ✓. None of the current models suits drums or bass.
+
+How it works: This is inference only: the model's encoder turns the stem into a latent, its decoder turns it back into audio, and the result is blended wet/dry before the mood chain. The model's latency is removed by cross-correlation. To use a model, put a trusted TorchScript export (`.ts`) in `doodlebeat/models/rave/` and reload the page. Only use files from a source you trust, because TorchScript can run code. Models are available at <https://acids-ircam.github.io/rave_models_download>.
+
+## Files
+
+| File | Role |
+| --- | --- |
+| `server/app.py` | FastAPI: serves the page, `/api/songs`, `/api/jobs`, `/api/mood`, `/api/render`, `/api/texture` |
+| `server/separate.py` | Demucs separation jobs |
+| `server/mood_model.py` | genres, settings schema, placeholder mood model (**plugin point**) |
+| `server/render.py` | pedalboard render (mix or stems) |
+| `server/texture.py` | RAVE texture jobs |
+| `js/dsp.js` | live Web Audio chain for each channel (formulas mirror `render.py`) |
+| `js/engine.js` | playback of the channels, offline renders for the visuals |
+| `js/mood.js` | color pad → genre blend |
+| `js/moodviz.js` | EQ/spectrum scope, settings bars, genre map |
+| `js/visualize.js` | spectral view |
+| `js/analysis.js` | BPM, key, chords of the original (shown under the waveform) |
+
+Uploaded songs, stems and renders are stored in `doodlebeat/work/`, which is ignored by git.

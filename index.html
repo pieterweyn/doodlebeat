@@ -5,82 +5,151 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>doodlebeat</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400..900;1,6..96,400..900&family=Manrope:wght@400;500;600;700;800&display=swap">
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <div class="drop-overlay">Drop to load your track</div>
+  <div class="drop-overlay">Drop to load your song</div>
+  <div id="server-banner" class="banner hidden"></div>
 
   <header class="topbar">
-    <div class="brand"><span class="d r"></span><span class="d g"></span><span class="d b"></span>doodlebeat</div>
+    <div class="brand"><span class="d r"></span><span class="d g"></span><span class="d b"></span><em>doodlebeat</em></div>
     <div class="source">
-      <input type="file" id="file-input" accept="audio/*" hidden>
-      <button id="load-btn" class="pill">⬆ Load track</button>
-      <button id="demo-btn" class="pill ghost">Demo beat</button>
-      <div class="track-meta"><span id="file-name">No track loaded</span><span id="chips" class="chips"></span></div>
+      <input type="file" id="file-input" accept="audio/*,video/*" hidden>
+      <button id="load-btn" class="pill">⬆ Select song</button>
+      <label class="select-wrap" title="Demucs model used to split the song">
+        <select id="sep-model" aria-label="Stem separation model"></select>
+      </label>
+      <div class="track-meta"><span id="file-name">No song yet</span><span id="chips" class="chips"></span></div>
       <span id="status" class="status"></span>
     </div>
   </header>
 
   <main>
-    <!-- Source lane -->
+    <!-- ① The song -->
     <section id="lane" class="lane" tabindex="0">
       <div id="lane-empty" class="lane-empty">
         <div class="lane-icon">♫</div>
-        <div><strong>Drop a beat, loop, or any musical pattern</strong><br><span>or click to browse · wav · mp3 · ogg · m4a</span></div>
+        <div><strong>Select or drop a song</strong><br><span>It is split into stems automatically · wav · mp3 · flac · m4a</span></div>
       </div>
       <div id="track-info" class="track-info hidden">
         <canvas id="wave"></canvas>
         <div id="chord-strip" class="chord-strip"></div>
       </div>
+      <div id="split-bar" class="split-bar hidden"><div class="split-fill"></div><span class="split-msg"></span></div>
     </section>
 
-    <!-- The mixer: color is the instrument -->
-    <section class="stage">
-      <div class="stage-label">Paint the sound</div>
-      <div class="stage-grid">
-        <div id="strips" class="strips"></div>
-        <div class="palette">
-          <div class="orb-wrap">
-            <canvas id="orb-wave" class="orb-wave" aria-hidden="true"></canvas>
-            <div id="swatch" class="orb">
-              <div class="orb-text"><div id="mood-label" class="mood-label"></div><div id="mood-desc" class="mood-desc"></div></div>
+    <!-- ② + ③ side by side when there is room -->
+    <div class="workbench" id="workbench">
+    <!-- ② The band: one channel per stem, replaceable, plus extra channels -->
+    <section id="band" class="band hidden">
+      <div class="section-head">
+        <h2 class="fancy">The band</h2>
+        <span class="section-sub">Every stem is a channel. Replace one with your own recording or add more.</span>
+      </div>
+      <div id="channels" class="channels"></div>
+      <div class="band-foot">
+        <input type="file" id="channel-input" accept="audio/*,video/*" hidden>
+        <button id="add-channel" class="pill ghost">＋ Add channel</button>
+        <span class="hint">New audio starts at 0:00 and is trimmed or padded to the song's length.</span>
+      </div>
+    </section>
+
+    <!-- ③ Set the mood -->
+    <div class="mood-wrap">
+      <section class="stage" id="stage">
+        <div class="stage-head">
+          <h2 class="stage-title">Set the mood</h2>
+          <button id="spectrum-btn" class="spectrum-btn" aria-expanded="false" aria-controls="spectrum-overlay">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 18V12M7 18V7M11 18V4M15 18V9M19 18V13" /></svg>
+            <span>Spectrum</span>
+          </button>
+        </div>
+        <div class="stage-grid">
+          <div class="genres">
+            <div id="genre-bars" class="genre-bars"></div>
+            <div class="strength">
+              <span>Strength</span>
+              <div id="strength-bar" class="gbar" role="slider" tabindex="0" aria-label="Mood strength" aria-valuemin="0" aria-valuemax="100"><div class="gfill"></div></div>
+              <b id="strength-val">0%</b>
             </div>
+            <p id="model-note" class="hint"></p>
           </div>
-          <div class="pad-wrap">
-            <canvas id="color-pad" class="color-pad" aria-label="Color picker: drag to choose a color"></canvas>
-            <div id="pad-marker" class="pad-marker"></div>
+          <div class="palette">
+            <div class="orb-wrap">
+              <canvas id="orb-wave" class="orb-wave" aria-hidden="true"></canvas>
+              <div id="swatch" class="orb">
+                <div class="orb-text"><div id="mood-label" class="mood-label"></div><div id="mood-desc" class="mood-desc"></div></div>
+              </div>
+            </div>
+            <div class="pad-wrap">
+              <canvas id="color-pad" class="color-pad" aria-label="Mood color: drag to choose"></canvas>
+              <div id="pad-anchors" class="pad-anchors"></div>
+              <div id="pad-marker" class="pad-marker"></div>
+            </div>
+            <div id="rgb-map" class="rgb-map" aria-label="What each color component controls"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Spectral view: opens over the page, just below "Set the mood" -->
+      <section id="spectrum-overlay" class="spectrum-overlay" role="dialog" aria-label="Spectral view" hidden>
+        <div class="studio-head">
+          <h2 class="fancy">Spectral view</h2>
+          <span class="studio-sub">waveform & spectrogram: original → each channel with its mood → the mood mix</span>
+          <span id="viz-status" class="status"></span>
+          <button id="spectrum-close" class="close" aria-label="Close spectral view">✕</button>
+        </div>
+        <div id="viz-toolbar" class="viz-toolbar hidden">
+          <button data-zoom="in" title="Zoom in">＋</button>
+          <button data-zoom="out" title="Zoom out">−</button>
+          <button data-zoom="reset" title="Show the whole song">Reset</button>
+          <span class="viz-range"></span>
+          <span class="viz-help">scroll or pinch to zoom · drag to pan · double-click to reset · click to seek</span>
+        </div>
+        <div id="viz" class="viz"><p class="hint">Load a song to see each channel's waveform and spectrogram.</p></div>
+      </section>
+    </div>
+
+    <!-- ④ The heart: what the mood does to every instrument -->
+    <section class="scope" id="scope">
+      <div class="section-head">
+        <h2 class="fancy">The mood, per instrument</h2>
+        <span class="section-sub">EQ curve, live spectrum before → after, dynamics & space, and where the mood sits in the genre map.</span>
+      </div>
+      <div id="scope-chips" class="scope-chips"></div>
+      <div class="scope-grid">
+        <div class="scope-main">
+          <canvas id="eq-canvas" class="eq-canvas" aria-label="EQ curve and live spectrum"></canvas>
+          <div class="eq-legend">
+            <span><i class="pre"></i>before</span><span><i class="post"></i>after</span><span><i class="curve"></i>EQ</span><span><i class="dash"></i>mood only</span>
+            <span class="eq-help">drag a dot: up/down = gain, left/right = frequency · double-click resets it</span>
+            <button id="eq-reset" class="pill ghost small" disabled>Reset EQ</button>
+          </div>
+        </div>
+        <div class="scope-side">
+          <div id="param-bars" class="param-bars"></div>
+          <div class="latent">
+            <div class="latent-head">Genre map <span id="latent-sub" class="hint"></span></div>
+            <canvas id="latent-canvas" class="latent-canvas" aria-label="Genre map"></canvas>
           </div>
         </div>
       </div>
     </section>
-
-    <!-- Spectral view -->
-    <details id="studio" class="studio" open>
-      <summary class="studio-head">
-        <span class="chev" aria-hidden="true">▸</span>
-        <h2>Spectral view</h2>
-        <span class="studio-sub">waveform & spectrogram for each channel</span>
-        <span id="viz-status" class="status"></span>
-      </summary>
-      <p class="hint">Each row adds one color channel on top of the row above it. All rows share one loudness scale, so the change from one row to the next is that channel's contribution.</p>
-      <div id="viz-toolbar" class="viz-toolbar hidden">
-        <button data-zoom="in" title="Zoom in">＋</button>
-        <button data-zoom="out" title="Zoom out">−</button>
-        <button data-zoom="reset" title="Show the whole track">Reset</button>
-        <span class="viz-range"></span>
-        <span class="viz-help">scroll or pinch to zoom · drag to pan · double-click to reset · click to seek</span>
-      </div>
-      <div id="viz" class="viz"><p class="hint">Load a track to see each channel's waveform and spectrogram.</p></div>
-    </details>
   </main>
 
   <footer class="transport">
     <button id="play-btn" class="play" disabled aria-label="Play">▶</button>
     <span class="time"><span id="t-cur">0:00</span> / <span id="t-dur">0:00</span></span>
-    <label class="vol">Original <input type="range" id="base-vol" min="0" max="100" value="80"></label>
+    <label class="toggle" title="Compare the mood with the song as recorded"><input type="checkbox" id="mood-on" checked><span class="sw"></span> Mood</label>
     <label class="loop"><input type="checkbox" id="loop" checked> Loop</label>
-    <button id="export-btn" class="pill" disabled>⤓ Export WAV</button>
+    <span id="mode-tag" class="mode-tag"></span>
+    <div class="exports">
+      <button id="stems-btn" class="pill ghost" disabled title="Processed stems, aligned at 0:00, ready to drop into GarageBand">⤓ Stems for GarageBand</button>
+      <button id="export-btn" class="pill" disabled title="Full-quality render on the server (pedalboard)">⤓ Render mix</button>
+    </div>
   </footer>
 
   <script type="module" src="js/main.js"></script>

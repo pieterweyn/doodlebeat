@@ -1,0 +1,13 @@
+work/
+models/
+__pycache__/
+.DS_Store
+
+# Large / copyrighted audio: keep local only
+AudioFile/*
+!AudioFile/Acoustic-old-school-drum-loop-100-bpm.wav
+!AudioFile/Drum-machine-beat-132-BPM.wav
+!AudioFile/EDM-drum-loop-driving-beat.wav
+mixes/
+*.zip
+*.mp3
